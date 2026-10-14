@@ -2,6 +2,7 @@ import React from 'react';
 import { api } from './api.js';
 import Icon from './components/Icon.jsx';
 import { Button, DialogProvider, ToastProvider } from './components/kit.jsx';
+import { useI18n } from './i18n.jsx';
 import Projects from './pages/Projects.jsx';
 import ProjectEditor from './pages/ProjectEditor.jsx';
 import Settings from './pages/Settings.jsx';
@@ -33,16 +34,46 @@ function useTheme() {
   return [theme, () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))];
 }
 
-function Brand() {
+function readCollapsed() {
+  try { return localStorage.getItem('sav-sidebar') === 'collapsed'; } catch { return false; }
+}
+
+function useSidebar() {
+  const [collapsed, setCollapsed] = React.useState(readCollapsed);
+  React.useEffect(() => {
+    try { localStorage.setItem('sav-sidebar', collapsed ? 'collapsed' : 'expanded'); } catch { /* private mode */ }
+  }, [collapsed]);
+  return [collapsed, () => setCollapsed((v) => !v)];
+}
+
+function Brand({ compact = false }) {
+  const { t } = useI18n();
   return (
-    <div className="brand">
-      <span className="brand-logo"><Icon name="film" size={17} /></span>
-      <span>Sandroid<small>AI Video Studio</small></span>
+    <div className={`brand${compact ? ' compact' : ''}`}>
+      <span className="brand-logo"><img src="/logo-sandroid.svg" alt="Sandroid" /></span>
+      {!compact && <span>Sandroid<small>{t('brand.subtitle')}</small></span>}
     </div>
   );
 }
 
+function LangSwitcher({ collapsed = false }) {
+  const { lang, setLang, locales, t } = useI18n();
+  return (
+    <label className={`lang-switch${collapsed ? ' collapsed' : ''}`} title={t('lang.name')}>
+      <Icon name="globe" size={collapsed ? 18 : 16} />
+      {collapsed
+        ? <span className="lang-short">{locales.find((l) => l.code === lang)?.short}</span>
+        : (
+          <select value={lang} onChange={(e) => setLang(e.target.value)} aria-label={t('lang.name')}>
+            {locales.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+          </select>
+        )}
+    </label>
+  );
+}
+
 function Login({ onLogin }) {
+  const { t } = useI18n();
   const [mode, setMode] = React.useState('login');
   const [form, setForm] = React.useState({ username: '', password: '' });
   const [error, setError] = React.useState('');
@@ -67,27 +98,30 @@ function Login({ onLogin }) {
 
   return (
     <div className="login-wrap">
+      <div className="login-lang"><LangSwitcher /></div>
       <form onSubmit={submit} className="login card stack">
         <Brand />
         <div>
-          <h1>{mode === 'login' ? 'Selamat datang' : 'Buat akun'}</h1>
+          <h1>{t(mode === 'login' ? 'login.welcome' : 'login.register')}</h1>
           <p className="muted" style={{ margin: '4px 0 0' }}>
-            {mode === 'login' ? 'Masuk untuk lanjut membuat video.' : 'Daftar untuk mulai membuat video dari prompt.'}
+            {t(mode === 'login' ? 'login.hintLogin' : 'login.hintRegister')}
           </p>
         </div>
-        <label className="field">Username
+        <label className="field">{t('login.username')}
           <input autoFocus autoComplete="username" value={form.username}
             onChange={(e) => setForm({ ...form, username: e.target.value })} required />
         </label>
-        <label className="field">Password
+        <label className="field">{t('login.password')}
           <input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required />
         </label>
         {error && <div className="alert bad"><Icon name="alert" /><div>{error}</div></div>}
-        <Button className="primary lg" type="submit" loading={busy}>{mode === 'login' ? 'Masuk' : 'Daftar'}</Button>
+        <Button className="primary lg" type="submit" loading={busy}>
+          {t(mode === 'login' ? 'login.submit' : 'login.submitRegister')}
+        </Button>
         {registrationOpen && (
           <button type="button" className="btn ghost" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>
-            {mode === 'login' ? 'Belum punya akun? Daftar' : 'Sudah punya akun? Masuk'}
+            {t(mode === 'login' ? 'login.switchToRegister' : 'login.switchToLogin')}
           </button>
         )}
       </form>
@@ -96,9 +130,11 @@ function Login({ onLogin }) {
 }
 
 function Shell() {
+  const { t } = useI18n();
   const route = useHashRoute();
   const [user, setUser] = React.useState(undefined);
   const [theme, toggleTheme] = useTheme();
+  const [collapsed, toggleSidebar] = useSidebar();
 
   React.useEffect(() => {
     api.get('/auth/me').then(setUser).catch(() => setUser(null));
@@ -123,44 +159,62 @@ function Shell() {
   else page = <Projects />;
 
   const items = [
-    ['/projects', 'folder', 'Project'],
-    ['/settings', 'settings', 'Pengaturan'],
-    ['/docs', 'book', 'API'],
-    ...(user.role === 'admin' ? [['/admin', 'shield', 'Admin']] : []),
+    ['/projects', 'folder', t('nav.projects')],
+    ['/settings', 'settings', t('nav.settings')],
+    ['/docs', 'book', t('nav.docs')],
+    ...(user.role === 'admin' ? [['/admin', 'shield', t('nav.admin')]] : []),
   ];
   const nav = items.map(([path, icon, label]) => (
-    <button key={path} className={`nav-item${route.startsWith(path) ? ' active' : ''}`} onClick={() => go(path)}>
-      <Icon name={icon} size={18} /> {label}
+    <button key={path} className={`nav-item${route.startsWith(path) ? ' active' : ''}`}
+      onClick={() => go(path)} title={collapsed ? label : undefined}>
+      <Icon name={icon} size={18} /> {!collapsed && <span className="nav-label">{label}</span>}
     </button>
   ));
+  const themeLabel = t(theme === 'dark' ? 'theme.toLight' : 'theme.toDark');
   const themeBtn = (
-    <button className="btn ghost icon" onClick={toggleTheme} title={theme === 'dark' ? 'Tema terang' : 'Tema gelap'}>
+    <button className="btn ghost icon" onClick={toggleTheme} title={themeLabel} aria-label={themeLabel}>
       <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
     </button>
   );
 
   return (
-    <div className="app">
+    <div className={`app${collapsed ? ' sidebar-collapsed' : ''}`}>
       <aside className="sidebar">
-        <Brand />
-        <button className="btn primary" style={{ marginBottom: 12 }} onClick={() => go('/projects?new')}>
-          <Icon name="plus" /> Video baru
+        <div className="sidebar-top">
+          {collapsed ? <Brand compact /> : <Brand />}
+          <button className="btn ghost icon sidebar-toggle" onClick={toggleSidebar}
+            title={t(collapsed ? 'sidebar.expand' : 'sidebar.collapse')}
+            aria-label={t(collapsed ? 'sidebar.expand' : 'sidebar.collapse')}>
+            <Icon name={collapsed ? 'panel-left-open' : 'panel-left-close'} size={18} />
+          </button>
+        </div>
+        <button className="btn primary new-video" onClick={() => go('/projects?new')}
+          title={collapsed ? t('nav.newVideo') : undefined}>
+          <Icon name="plus" /> {!collapsed && t('nav.newVideo')}
         </button>
         {nav}
         <div className="sidebar-foot">
+          <LangSwitcher collapsed={collapsed} />
           <div className="user-chip">
-            <span className="avatar">{user.username.slice(0, 1)}</span>
-            <span className="grow ellipsis">{user.username}<div className="faint small">{user.role}</div></span>
+            <span className="avatar" title={user.username}>{user.username.slice(0, 1)}</span>
+            {!collapsed && (
+              <span className="grow ellipsis">{user.username}<div className="faint small">{user.role}</div></span>
+            )}
             {themeBtn}
           </div>
-          <button className="nav-item" onClick={logout}><Icon name="logout" size={18} /> Keluar</button>
+          <button className="nav-item" onClick={logout} title={collapsed ? t('nav.logout') : undefined}>
+            <Icon name="logout" size={18} /> {!collapsed && <span className="nav-label">{t('nav.logout')}</span>}
+          </button>
         </div>
       </aside>
       <div className="main">
         <header className="mobile-bar">
           <Brand />
+          <LangSwitcher />
           {themeBtn}
-          <button className="btn ghost icon" onClick={logout} title="Keluar"><Icon name="logout" size={18} /></button>
+          <button className="btn ghost icon" onClick={logout} title={t('nav.logout')} aria-label={t('nav.logout')}>
+            <Icon name="logout" size={18} />
+          </button>
         </header>
         <main className="page">{page}</main>
         <nav className="bottom-nav">{nav}</nav>

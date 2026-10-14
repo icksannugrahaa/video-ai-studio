@@ -48,6 +48,10 @@ const PATHS = {
   send: 'M22 2L11 13M22 2l-7 20-4-9-9-4z',
   book: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z',
   eye: 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  'panel-left': 'M3 3h18v18H3zM9 3v18',
+  'panel-left-close': 'M3 3h18v18H3zM9 3v18M16 9l-3 3 3 3',
+  'panel-left-open': 'M3 3h18v18H3zM9 3v18M14 9l3 3-3 3',
+  globe: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z',
 };
 
 export default function Icon({ name, size = 16, className = '', strokeWidth = 2, ...rest }) {

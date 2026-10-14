@@ -1,8 +1,8 @@
 // Pure helpers shared by the editor components.
 
 export const JOB_LABEL = {
-  plan: 'Menyusun storyboard', render: 'Render video', edit: 'Edit via prompt', regenerate: 'Regenerate scene',
-  compose: 'Menggabung video', music_prompt: 'Prompt musik',
+  plan: 'job.kind.plan', render: 'job.kind.render', edit: 'job.kind.edit', regenerate: 'job.kind.regenerate',
+  compose: 'job.kind.compose', music_prompt: 'job.kind.music_prompt', preview: 'job.kind.preview',
 };
 
 export const RESUMABLE = ['render', 'edit', 'regenerate'];
@@ -16,7 +16,7 @@ export function sceneState(scene) {
 }
 
 export const SCENE_LABEL = {
-  done: 'Clip jadi', stale: 'Perlu dibuat ulang', running: 'Sedang dibuat', failed: 'Gagal', pending: 'Belum dibuat',
+  done: 'sb.stateDone', stale: 'sb.stateStale', running: 'sb.stateRunning', failed: 'sb.stateFailed', pending: 'sb.statePending',
 };
 
 export const totalSeconds = (scenes) => scenes.reduce((a, s) => a + Number(s.duration || 0), 0);

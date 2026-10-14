@@ -9,8 +9,9 @@ import SettingsPanel from '../components/editor/SettingsPanel.jsx';
 import Storyboard from '../components/editor/Storyboard.jsx';
 import SummaryCard from '../components/editor/SummaryCard.jsx';
 import { isActive, sceneState, totalSeconds } from '../components/editor/shared.js';
+import { useT } from '../i18n.jsx';
 
-const EDIT_EXAMPLES = ['Ganti scene 2 jadi malam hari', 'Narasi lebih santai dan lucu', 'Tambah scene penutup ajakan follow', 'Perpendek jadi 30 detik'];
+const EDIT_EXAMPLES = ['editor.ex1', 'editor.ex2', 'editor.ex3', 'editor.ex4'];
 
 function Stepper({ steps }) {
   const current = steps.findIndex((s) => !s.done);
@@ -28,6 +29,7 @@ function Stepper({ steps }) {
 }
 
 function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPreview, previewBusy }) {
+  const t = useT();
   const total = project.scenes.length;
   const o = project.options;
   const hasFinal = project.files.includes('final.mp4');
@@ -37,43 +39,43 @@ function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPr
   let actions;
   if (!project.profile_id) {
     icon = 'server';
-    title = 'Pilih profil provider';
-    text = 'Profil menentukan endpoint AI dan model chat/video/TTS yang dipakai.';
-    actions = <Button className="primary" icon="sliders" onClick={() => onTab('settings')}>Buka pengaturan</Button>;
+    title = t('next.pickProfileTitle');
+    text = t('next.pickProfileText');
+    actions = <Button className="primary" icon="sliders" onClick={() => onTab('settings')}>{t('next.openSettings')}</Button>;
   } else if (!total) {
-    title = 'Susun storyboard';
-    text = 'AI memecah idemu menjadi scene. Kamu bisa mengedit semuanya sebelum render.';
-    actions = <Button className="primary" icon="sparkles" onClick={onPlan}>Susun dengan AI</Button>;
+    title = t('next.planTitle');
+    text = t('next.planText');
+    actions = <Button className="primary" icon="sparkles" onClick={onPlan}>{t('next.planCta')}</Button>;
   } else if (clipsReady === 0) {
     icon = 'play';
-    title = 'Periksa storyboard, lalu render';
-    text = `${total} scene · ${fmtDuration(totalSeconds(project.scenes))}. Render memakai kredit provider video.`;
-    actions = <Button className="primary" icon="play" onClick={onRender}>Render video</Button>;
+    title = t('next.renderTitle');
+    text = t('next.renderText', { total, duration: fmtDuration(totalSeconds(project.scenes), t) });
+    actions = <Button className="primary" icon="play" onClick={onRender}>{t('next.renderCta')}</Button>;
   } else if (clipsReady < total) {
     icon = 'play';
-    title = `${clipsReady}/${total} clip sudah jadi`;
-    text = 'Lanjutkan untuk membuat sisanya — clip yang sudah jadi tidak dibuat ulang.';
+    title = t('next.partialTitle', { ready: clipsReady, total });
+    text = t('next.partialText');
     actions = (
       <>
-        <Button className="primary" icon="play" onClick={onResume}>Lanjutkan render</Button>
-        <Button icon="eye" loading={previewBusy} onClick={onPreview}>{previewBusy ? 'Membuat render sementara…' : 'Render sementara'}</Button>
+        <Button className="primary" icon="play" onClick={onResume}>{t('next.resumeCta')}</Button>
+        <Button icon="eye" loading={previewBusy} onClick={onPreview}>{previewBusy ? t('next.previewBusy') : t('next.previewCta')}</Button>
       </>
     );
   } else if (!hasFinal) {
     icon = 'layers';
-    title = 'Semua clip siap';
-    text = 'Tinggal narasi, subtitle, dan penggabungan menjadi satu video.';
-    actions = <Button className="primary" icon="layers" onClick={onResume}>Gabungkan jadi video final</Button>;
+    title = t('next.allClipsTitle');
+    text = t('next.allClipsText');
+    actions = <Button className="primary" icon="layers" onClick={onResume}>{t('next.composeCta')}</Button>;
   } else if (o.music_mode === 'external' && !o.music_file) {
     icon = 'music';
-    title = 'Video jadi — tambahkan musik?';
-    text = 'Buat musiknya di Gemini dari prompt yang sudah disiapkan, upload, lalu gabung ulang.';
-    actions = <Button className="primary" icon="music" onClick={() => onTab('music')}>Buka musik</Button>;
+    title = t('next.musicTitle');
+    text = t('next.musicText');
+    actions = <Button className="primary" icon="music" onClick={() => onTab('music')}>{t('next.openMusic')}</Button>;
   } else {
     icon = 'check';
-    title = 'Video siap diunggah 🎉';
-    text = 'Ubah scene, musik, atau subtitle kapan saja — hanya bagian yang berubah yang diproses ulang.';
-    actions = <a className="btn primary" href={fileUrl(project.id, 'final.mp4', project.updated_at)} download><Icon name="download" /> Unduh MP4</a>;
+    title = t('next.doneTitle');
+    text = t('next.doneText');
+    actions = <a className="btn primary" href={fileUrl(project.id, 'final.mp4', project.updated_at)} download><Icon name="download" /> {t('next.download')}</a>;
   }
   return (
     <div className="card next-cta">
@@ -85,6 +87,7 @@ function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPr
 }
 
 export default function ProjectEditor({ projectId }) {
+  const t = useT();
   const toast = useToast();
   const dialog = useDialog();
   const [project, setProject] = React.useState(null);
@@ -132,9 +135,9 @@ export default function ProjectEditor({ projectId }) {
     if (prev && previewJob && prev.id === previewJob.id && isActive(prev) && !isActive(previewJob)) {
       if (previewJob.status === 'succeeded') {
         setSource('preview');
-        toast(`Render sementara siap · ${(previewJob.result?.scenes_used || []).length} scene`, 'ok');
+        toast(t('editor.previewReady', { n: (previewJob.result?.scenes_used || []).length }), 'ok');
       } else if (previewJob.status === 'failed') {
-        toast(`Render sementara gagal: ${previewJob.message}`, 'bad');
+        toast(t('editor.previewFailed', { msg: previewJob.message }), 'bad');
       }
     }
     prevPreview.current = previewJob || null;
@@ -144,7 +147,7 @@ export default function ProjectEditor({ projectId }) {
   const hasFinal = project?.files.includes('final.mp4');
   const prevFinal = React.useRef(hasFinal);
   React.useEffect(() => {
-    if (hasFinal && prevFinal.current === false) { setSource('final'); toast('Video final selesai dibuat!', 'ok'); }
+    if (hasFinal && prevFinal.current === false) { setSource('final'); toast(t('editor.finalReady'), 'ok'); }
     prevFinal.current = hasFinal;
   }, [hasFinal, toast]);
 
@@ -162,8 +165,8 @@ export default function ProjectEditor({ projectId }) {
 
   if (!project) {
     return loadError
-      ? <div className="card"><Empty icon="alert" title="Project tidak bisa dibuka">{loadError}<a href="#/projects">← Kembali ke project</a></Empty></div>
-      : <Empty icon="loader" title="Memuat project…" />;
+      ? <div className="card"><Empty icon="alert" title={t('editor.loadError')}>{loadError}<a href="#/projects">{t('editor.backToProjects')}</a></Empty></div>
+      : <Empty icon="loader" title={t('editor.loadingProject')} />;
   }
 
   const busy = isActive(active);
@@ -187,14 +190,14 @@ export default function ProjectEditor({ projectId }) {
 
   function saveTitle() {
     if (title.trim() === project.title) return;
-    run(() => api.patch(`/projects/${projectId}`, { title: title.trim() }), 'Judul tersimpan.');
+    run(() => api.patch(`/projects/${projectId}`, { title: title.trim() }), t('editor.titleSaved'));
   }
 
   async function saveScenes() {
     const bad = scenes.findIndex((s) => !s.visual_prompt.trim() || !(Number(s.duration) >= 1 && Number(s.duration) <= 30));
     if (bad >= 0) {
       setSelected(bad);
-      toast(`Scene ${bad + 1}: prompt visual wajib diisi dan durasi 1–30 detik.`, 'bad');
+      toast(t('editor.sceneInvalid', { n: bad + 1 }), 'bad');
       return;
     }
     // The server matches scenes by position: a changed visual/duration at an index throws away that clip.
@@ -203,9 +206,9 @@ export default function ProjectEditor({ projectId }) {
       || scenes[i].visual_prompt !== s.visual_prompt || Math.abs(Number(scenes[i].duration) - Number(s.duration)) > 0.01
       || Boolean(scenes[i].continues && i > 0) !== Boolean(s.continues))).length;
     if (lost && !(await dialog.confirm({
-      title: 'Simpan storyboard?',
-      body: <><strong>{lost} clip yang sudah jadi</strong> akan dibuat ulang saat render berikutnya, karena visual/durasi/urutan/sambungan scene-nya berubah. Ini memakai kredit provider.</>,
-      confirmLabel: 'Simpan',
+      title: t('editor.saveStoryboardTitle'),
+      body: <>{t('editor.saveStoryboardBody', { n: lost })}</>,
+      confirmLabel: t('editor.saveStoryboardConfirm'),
     }))) return;
     setSaving(true);
     const body = { scenes: scenes.map((s, i) => ({ visual_prompt: s.visual_prompt, narration: s.narration || '',
@@ -215,14 +218,14 @@ export default function ProjectEditor({ projectId }) {
     if (result) {
       setDirty(false);
       setScenes(result.scenes.map((s) => ({ ...s })));
-      toast(`Storyboard tersimpan · ${result.diff.changed_visual.length} scene perlu clip baru.`, 'ok');
+      toast(t('editor.storyboardSaved', { n: result.diff.changed_visual.length }), 'ok');
     }
   }
   saveRef.current = saveScenes;
 
   function startPreview() {
     return run(() => api.post(`/projects/${projectId}/preview`),
-      busy ? 'Render sementara dibuat di samping render utama…' : 'Membuat render sementara dari clip yang sudah jadi…');
+      busy ? t('editor.previewStartedBusy') : t('editor.previewStarted'));
   }
 
   function resetScenes() {
@@ -232,13 +235,11 @@ export default function ProjectEditor({ projectId }) {
 
   function musicWarning() {
     if (o.music_mode !== 'external' || o.music_file) return null;
-    return o.music_style === 'song'
-      ? 'Mode lagu tapi file lagu belum diunggah — video akan tanpa suara karena narasi tidak dipakai. Upload lagunya nanti lalu “Gabung ulang video”.'
-      : 'Musik belum diunggah — video dibuat tanpa musik. Bisa ditambahkan nanti lewat “Gabung ulang” tanpa membuat ulang clip.';
+    return o.music_style === 'song' ? t('editor.musicWarningSong') : t('editor.musicWarningNone');
   }
 
   async function startRender(resume) {
-    if (dirty) { toast('Simpan perubahan storyboard dulu.', 'bad'); return; }
+    if (dirty) { toast(t('editor.saveFirst'), 'bad'); return; }
     let estimate;
     try {
       ({ estimate } = await api.post(`/projects/${projectId}/render`, {}));
@@ -246,51 +247,51 @@ export default function ProjectEditor({ projectId }) {
     const warn = musicWarning();
     const first = estimate.pending_idx?.[0];
     const ok = await dialog.confirm({
-      title: resume ? 'Lanjutkan render?' : 'Mulai render?',
+      title: resume ? t('editor.resumeRenderTitle') : t('editor.startRenderTitle'),
       body: (
         <>
           <div className="stats">
-            <div className="stat"><b>{estimate.clips_to_generate}</b><span>clip baru</span></div>
-            <div className="stat"><b>{estimate.scenes - estimate.clips_to_generate}</b><span>clip dipakai ulang</span></div>
-            <div className="stat"><b>{fmtDuration(estimate.total_seconds)}</b><span>durasi video</span></div>
+            <div className="stat"><b>{estimate.clips_to_generate}</b><span>{t('editor.newClips')}</span></div>
+            <div className="stat"><b>{estimate.scenes - estimate.clips_to_generate}</b><span>{t('editor.reusedClips')}</span></div>
+            <div className="stat"><b>{fmtDuration(estimate.total_seconds, t)}</b><span>{t('editor.videoDuration')}</span></div>
           </div>
           {estimate.clips_to_generate
-            ? <>Mulai dari <strong>scene {first + 1}</strong>. Membuat clip memakai kredit provider video.</>
-            : 'Semua clip sudah ada — hanya narasi, subtitle, dan penggabungan yang diproses.'}
+            ? <>{t('editor.startFromScene', { n: first + 1 })}</>
+            : t('editor.allClipsExist')}
           {warn && <div className="alert warn" style={{ marginTop: 12 }}><Icon name="alert" /><div>{warn}</div></div>}
         </>
       ),
-      confirmLabel: estimate.clips_to_generate ? `Render ${estimate.clips_to_generate} clip` : 'Gabungkan',
+      confirmLabel: estimate.clips_to_generate ? t('editor.renderNClips', { n: estimate.clips_to_generate }) : t('editor.composeBtn'),
     });
     if (!ok) return;
-    await run(() => api.post(`/projects/${projectId}/render`, { confirm: true }), resume ? 'Render dilanjutkan.' : 'Render dimulai.');
+    await run(() => api.post(`/projects/${projectId}/render`, { confirm: true }), resume ? t('editor.renderResumed') : t('editor.renderStarted'));
   }
 
   async function plan() {
     if (project.scenes.length && !(await dialog.confirm({
-      title: 'Susun ulang storyboard?',
-      body: 'AI akan menulis storyboard baru dari ide/prompt. Scene yang visualnya berubah perlu clip baru saat render.',
-      confirmLabel: 'Susun ulang',
+      title: t('editor.replanTitle'),
+      body: t('editor.replanBody'),
+      confirmLabel: t('editor.replanConfirm'),
     }))) return;
-    await run(() => api.post(`/projects/${projectId}/plan`), 'AI sedang menyusun storyboard…');
+    await run(() => api.post(`/projects/${projectId}/plan`), t('editor.planStarted'));
   }
 
   async function regenerate(i) {
     if (!(await dialog.confirm({
-      title: `Regenerate scene ${i + 1}?`,
-      body: 'Clip scene ini dibuat ulang dengan prompt yang sama (hasil bisa berbeda). Memakai kredit provider.',
-      confirmLabel: 'Regenerate',
+      title: t('editor.regenTitle', { n: i + 1 }),
+      body: t('editor.regenBody'),
+      confirmLabel: t('editor.regenConfirm'),
     }))) return;
-    await run(() => api.post(`/projects/${projectId}/scenes/${i}/regenerate`), `Regenerate scene ${i + 1} dimulai.`);
+    await run(() => api.post(`/projects/${projectId}/scenes/${i}/regenerate`), t('editor.regenStarted', { n: i + 1 }));
   }
 
   async function removeProject() {
     if (!(await dialog.confirm({
-      title: 'Hapus project?', danger: true, confirmLabel: 'Hapus permanen',
-      body: <>Project <strong>{project.title || `#${project.id}`}</strong> beserta semua clip dan videonya akan dihapus. Tidak bisa dibatalkan.</>,
+      title: t('editor.deleteTitle'), danger: true, confirmLabel: t('editor.deleteConfirm'),
+      body: <>{t('editor.deleteBody', { name: project.title || `#${project.id}` })}</>,
     }))) return;
     const ok = await run(() => api.del(`/projects/${projectId}`));
-    if (ok) { toast('Project dihapus.', 'ok'); window.location.hash = '/projects'; }
+    if (ok) { toast(t('editor.projectDeleted'), 'ok'); window.location.hash = '/projects'; }
   }
 
   const selectScene = (i) => {
@@ -299,28 +300,28 @@ export default function ProjectEditor({ projectId }) {
   };
 
   const steps = [
-    { label: 'Ide', done: Boolean(project.prompt.trim()) },
-    { label: 'Storyboard', done: project.scenes.length > 0 },
-    { label: 'Render clip', done: project.scenes.length > 0 && clipsReady === project.scenes.length },
-    { label: 'Musik', done: project.scenes.length > 0 && (o.music_mode === 'none' || Boolean(o.music_file)) },
-    { label: 'Video final', done: hasFinal },
+    { label: t('step.idea'), done: Boolean(project.prompt.trim()) },
+    { label: t('step.storyboard'), done: project.scenes.length > 0 },
+    { label: t('step.renderClips'), done: project.scenes.length > 0 && clipsReady === project.scenes.length },
+    { label: t('step.music'), done: project.scenes.length > 0 && (o.music_mode === 'none' || Boolean(o.music_file)) },
+    { label: t('step.finalVideo'), done: hasFinal },
   ];
   const failedScenes = project.scenes.filter((s) => sceneState(s) === 'failed').length;
   const tabs = [
-    ['storyboard', 'layers', 'Storyboard', project.scenes.length ? <span className="count">{project.scenes.length}</span> : null, failedScenes > 0],
-    ['music', 'music', 'Musik', null, o.music_mode === 'external' && !o.music_file],
-    ['edit', 'wand', 'Edit dengan AI', null, false],
-    ['settings', 'sliders', 'Pengaturan', null, !project.profile_id],
+    ['storyboard', 'layers', t('editor.tabStoryboard'), project.scenes.length ? <span className="count">{project.scenes.length}</span> : null, failedScenes > 0],
+    ['music', 'music', t('editor.tabMusic'), null, o.music_mode === 'external' && !o.music_file],
+    ['edit', 'wand', t('editor.tabEdit'), null, false],
+    ['settings', 'sliders', t('editor.tabSettings'), null, !project.profile_id],
   ];
 
   return (
     <>
-      <a className="crumb" href="#/projects"><Icon name="left" size={14} /> Semua project</a>
+      <a className="crumb" href="#/projects"><Icon name="left" size={14} /> {t('editor.allProjects')}</a>
       <div className="editor-title">
-        <input className="title-input" value={title} placeholder={`Project #${project.id}`} aria-label="Judul project"
+        <input className="title-input" value={title} placeholder={t('editor.projectPlaceholder', { id: project.id })} aria-label={t('editor.projectTitle')}
           onChange={(e) => setTitle(e.target.value)} onBlur={saveTitle}
           onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
-        <StatusBadge status={busy ? 'rendering' : project.status} label={busy ? 'Memproses' : undefined} />
+        <StatusBadge status={busy ? 'rendering' : project.status} label={busy ? t('status.running') : undefined} />
       </div>
       <Stepper steps={steps} />
 
@@ -329,8 +330,8 @@ export default function ProjectEditor({ projectId }) {
           {lastJob && (busy || ['failed', 'canceled'].includes(lastJob.status)) && (
             <JobCard job={lastJob} scenes={project.scenes} onSelectScene={selectScene}
               onCancel={async () => {
-                if (await dialog.confirm({ title: 'Batalkan job?', body: 'Clip yang sudah jadi tetap tersimpan — bisa dilanjutkan nanti.', confirmLabel: 'Batalkan job', danger: true })) {
-                  run(() => api.post(`/jobs/${lastJob.id}/cancel`), 'Job dibatalkan.');
+                if (await dialog.confirm({ title: t('editor.cancelJobTitle'), body: t('editor.cancelJobBody'), confirmLabel: t('editor.cancelJobConfirm'), danger: true })) {
+                  run(() => api.post(`/jobs/${lastJob.id}/cancel`), t('editor.jobCanceled'));
                 }
               }}
               onResume={() => startRender(true)}
@@ -345,7 +346,7 @@ export default function ProjectEditor({ projectId }) {
           {!busy && hasFinal && <SummaryCard project={project} onSelectScene={selectScene} />}
           {lastJob && !busy && lastJob.status === 'succeeded' && (
             <div className="faint small row" style={{ padding: '0 4px' }}>
-              <Icon name="check" size={13} /> Terakhir: {lastJob.message || lastJob.kind}
+              <Icon name="check" size={13} /> {t('editor.lastJob', { msg: lastJob.message || t(`job.kind.${lastJob.kind}`) })}
             </div>
           )}
         </div>
@@ -370,20 +371,20 @@ export default function ProjectEditor({ projectId }) {
           {tab === 'edit' && (
             <div className="stack">
               <p className="muted" style={{ margin: 0 }}>
-                Tulis perubahan dengan bahasa biasa. AI mengubah storyboard, lalu hanya scene yang berubah yang dibuat ulang.
+                {t('editor.editIntro')}
               </p>
-              <textarea rows={4} value={instruction} placeholder="Mis. ganti scene 2 jadi malam hari dan narasinya lebih dramatis"
+              <textarea rows={4} value={instruction} placeholder={t('editor.editPlaceholder')}
                 onChange={(e) => setInstruction(e.target.value)} />
               <div className="examples">
-                {EDIT_EXAMPLES.map((ex) => <button key={ex} type="button" className="example" onClick={() => setInstruction(ex)}>{ex}</button>)}
+                {EDIT_EXAMPLES.map((ex) => <button key={ex} type="button" className="example" onClick={() => setInstruction(t(ex))}>{t(ex)}</button>)}
               </div>
               <div className="row">
                 <Button className="primary" icon="send" disabled={busy || !project.scenes.length || instruction.trim().length < 3}
-                  onClick={() => run(() => api.post(`/projects/${projectId}/edit`, { instruction }), 'Edit dimulai.').then((r) => r && setInstruction(''))}>
-                  Terapkan edit
+                  onClick={() => run(() => api.post(`/projects/${projectId}/edit`, { instruction }), t('editor.editStarted')).then((r) => r && setInstruction(''))}>
+                  {t('editor.applyEdit')}
                 </Button>
-                {!project.scenes.length && <span className="faint small">Susun storyboard dulu.</span>}
-                {busy && <span className="faint small">Tunggu job yang berjalan selesai.</span>}
+                {!project.scenes.length && <span className="faint small">{t('editor.planFirst')}</span>}
+                {busy && <span className="faint small">{t('editor.waitJob')}</span>}
               </div>
             </div>
           )}
