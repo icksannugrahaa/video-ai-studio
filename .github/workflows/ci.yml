@@ -1,0 +1,71 @@
+# CI runs only for pushes and pull requests that target the main branch.
+# Pushes to other branches (or feature-branch PRs) do not trigger it.
+# A feature-branch PR will still run CI once it is opened/updated against main.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # manual run from the Actions tab
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Python 3.10)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # Tests build Settings directly, but importing app.main reads these.
+      SAV_SECRET_KEY: ci-secret-key-0123456789-0123456789-0123456789
+      SAV_ADMIN_PASSWORD: ci-admin-pass
+      SAV_COOKIE_SECURE: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Compile check (no syntax >3.10)
+        run: python -m compileall -q app
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  ui:
+    name: UI (React + Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build

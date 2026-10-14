@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/icksannugrahaa/video-ai-studio/blob/main/docs/API.md
+    about: API reference and usage guide (docs/API.md)
+  - name: Questions & discussions
+    url: https://github.com/icksannugrahaa/video-ai-studio/discussions
+    about: Ask questions and discuss ideas (enable Discussions in repo settings)
