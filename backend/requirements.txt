@@ -1,0 +1,7 @@
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+pydantic>=2.6,<3
+python-multipart>=0.0.9
+itsdangerous>=2.1
+cryptography>=42
+requests>=2.31
