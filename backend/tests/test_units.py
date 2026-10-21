@@ -233,3 +233,25 @@ def test_clip_chains_follow_continues_flags():
     assert ids(clip_chains(scenes, continuity=False, bible=True)) == [[0], [1], [2], [3], [4], [5]]
     # legacy projects (no bible) seed every scene from the previous one → one chain
     assert ids(clip_chains(scenes, continuity=True, bible=False)) == [[0, 1, 2, 3, 4, 5]]
+
+
+def test_normalize_keeps_scenes_at_least_four_seconds():
+    board = planner.normalize({"scenes": [{"visual_prompt": "x", "duration": 3}, {"visual_prompt": "y", "duration": 2}]},
+                              clip_seconds=8, limit_seconds=60)
+    assert [s["duration"] for s in board["scenes"]] == [4.0, 4.0]
+    assert planner.min_clip_seconds(3) == 3  # a profile capped below 4 s still gets its own length
+
+
+def test_requeue_interrupted_resets_in_flight_clips(tmp_path):
+    from app.db import Database
+    from app.repo import Repo
+    repo = Repo(Database(tmp_path / "app.db"))
+    uid = repo.create_user("u", "password123")
+    pid = repo.create_project(uid, {"prompt": "x"})
+    repo.replace_scenes(pid, [{"visual_prompt": "a", "narration": "", "duration": 4},
+                              {"visual_prompt": "b", "narration": "", "duration": 4}])
+    first, second = repo.scenes(pid)
+    repo.update_scene(first["id"], clip_status="running")
+    repo.update_scene(second["id"], clip_status="done")
+    repo.requeue_interrupted()
+    assert [s["clip_status"] for s in repo.scenes(pid)] == ["pending", "done"]

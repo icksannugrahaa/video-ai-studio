@@ -14,6 +14,7 @@ import json
 import re
 
 WORDS_PER_SECOND = 2.4  # comfortable narration pace (id/en)
+MIN_CLIP_SECONDS = 4
 
 _SYSTEM = """You are a short-form video director. Plan a video as a sequence of scenes.
 Each scene becomes ONE separately generated AI video clip. Clips are generated independently, so consistency
@@ -108,9 +109,15 @@ def extract_json(text: str) -> dict:
     return data
 
 
+def min_clip_seconds(clip_seconds: int) -> int:
+    """Shortest clip to plan / request. Video models commonly reject < 4 s
+    (seen live: "supported range: 4-30 seconds")."""
+    return min(MIN_CLIP_SECONDS, clip_seconds)
+
+
 def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
     """Clamp durations, drop empty scenes, and stop before the preset limit."""
-    min_s = min(3, clip_seconds)
+    min_s = min_clip_seconds(clip_seconds)
     scenes, total = [], 0.0
     for raw in data.get("scenes") or []:
         if not isinstance(raw, dict):
@@ -138,7 +145,7 @@ def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
 
 def _rules(language: str, clip_seconds: int, target: int, limit: int, aspect: str) -> dict:
     return {
-        "language": language, "min_s": min(3, clip_seconds), "max_s": clip_seconds,
+        "language": language, "min_s": min_clip_seconds(clip_seconds), "max_s": clip_seconds,
         "words": int(clip_seconds * WORDS_PER_SECOND), "wps": WORDS_PER_SECOND,
         "target": target, "limit": limit, "aspect": aspect,
     }

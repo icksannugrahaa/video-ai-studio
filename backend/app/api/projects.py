@@ -36,6 +36,7 @@ class Options(BaseModel):
     bible_world: str | None = Field(default=None, max_length=1200)
     bible_style: str | None = Field(default=None, max_length=600)
     transition: float | None = Field(default=None, ge=0, le=1.5)
+    parallel_clips: bool | None = None
 
 
 class ProjectBody(BaseModel):

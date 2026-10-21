@@ -25,6 +25,7 @@ DEFAULT_OPTIONS = {
     "bible_world": "",
     "bible_style": "",
     "transition": 0.5,           # crossfade seconds between scenes that change place (0 = hard cut)
+    "parallel_clips": False,     # independent chains generate side by side (up to SAV_CLIP_CONCURRENCY)
 }
 
 
@@ -279,7 +280,10 @@ class Repo:
         return self._job_out(row) if row else None
 
     def requeue_interrupted(self) -> int:
-        """Jobs left ``running`` by a crash/restart are queued again (resume)."""
+        """Jobs left ``running`` by a crash/restart are queued again (resume).
+        Their in-flight clips died with the process, so those scenes go back to
+        ``pending`` instead of showing "building" until the job reaches them."""
+        self.db.execute("UPDATE scenes SET clip_status = 'pending' WHERE clip_status = 'running'")
         return self.db.execute("UPDATE jobs SET status = 'queued', message = 'dilanjutkan setelah restart' "
                                "WHERE status = 'running'")
 

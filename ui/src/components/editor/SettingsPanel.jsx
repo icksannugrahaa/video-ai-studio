@@ -10,7 +10,7 @@ const pick = (p) => ({
   prompt: p.prompt, preset: p.preset, target_seconds: p.target_seconds, language: p.language,
   profile_id: p.profile_id || '', voice: p.options.voice || '', continuity: p.options.continuity,
   burn_subtitles: p.options.burn_subtitles, keep_clip_audio: p.options.keep_clip_audio,
-  transition: p.options.transition ?? 0.5,
+  transition: p.options.transition ?? 0.5, parallel_clips: !!p.options.parallel_clips,
 });
 
 export default function SettingsPanel({ project, profiles, presets, busy, run, onDelete }) {
@@ -28,7 +28,7 @@ export default function SettingsPanel({ project, profiles, presets, busy, run, o
       prompt: form.prompt, preset: form.preset, language: form.language, target_seconds: Number(form.target_seconds),
       profile_id: form.profile_id ? Number(form.profile_id) : null,
       options: { continuity: form.continuity, burn_subtitles: form.burn_subtitles, keep_clip_audio: form.keep_clip_audio,
-        voice: form.voice, transition: Number(form.transition) },
+        voice: form.voice, transition: Number(form.transition), parallel_clips: form.parallel_clips },
     }), t('settings.savedProject'));
     if (result) setForm(pick(result));
     setSaving(false);
@@ -89,6 +89,8 @@ export default function SettingsPanel({ project, profiles, presets, busy, run, o
           hint={t('sp.burnSubtitlesHint')} />
         <Switch checked={form.keep_clip_audio} onChange={set('keep_clip_audio')} label={t('sp.keepClipAudio')}
           hint={t('sp.keepClipAudioHint')} />
+        <Switch checked={form.parallel_clips} onChange={set('parallel_clips')} label={t('sp.parallelClips')}
+          hint={t('sp.parallelClipsHint')} />
       </div>
 
       <div className="row">

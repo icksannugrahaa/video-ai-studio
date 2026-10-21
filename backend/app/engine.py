@@ -321,7 +321,10 @@ class Engine:
                     n = state["done"]
                 report(f"Clip {n}/{total} selesai")
 
-        lanes = max(1, min(self.settings.clip_concurrency, len(work_chains)))
+        # One clip at a time unless the project opts in: the phone server cannot
+        # take several video jobs at once. SAV_CLIP_CONCURRENCY caps the opt-in.
+        limit = self.settings.clip_concurrency if project["options"].get("parallel_clips") else 1
+        lanes = max(1, min(limit, len(work_chains)))
         report(f"Generate {total} clip" + (f" ({lanes} jalur paralel)" if lanes > 1 else "") + "…")
         if lanes == 1:
             for chain in work_chains:
@@ -345,7 +348,7 @@ class Engine:
             try:
                 video = client.generate_video(
                     profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"]),
-                    seconds=int(round(scene["duration"])),
+                    seconds=max(int(round(scene["duration"])), planner.min_clip_seconds(int(profile["clip_seconds"]))),
                     aspect_ratio=preset["model_aspect"], image_png=seed,
                     enable_audio=bool(project["options"].get("keep_clip_audio")),
                     should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",

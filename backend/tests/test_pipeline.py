@@ -314,7 +314,7 @@ def test_bible_prompts_and_smart_continuity(app, client, fake_client, settings, 
     assert [c[4] for c in video_calls] == [False, False, True]
     assert all(s["clip_gen_seconds"] is not None and s["clip_gen_seconds"] >= 0 and s["clip_attempts"] == 1
                for s in detail["scenes"])
-    assert abs(media.duration(settings.projects_dir / str(pid) / "final.mp4") - 9.0) < 0.3  # 3 scenes, min 3 s each
+    assert abs(media.duration(settings.projects_dir / str(pid) / "final.mp4") - 12.0) < 0.3  # 3 scenes, min 4 s each
 
 
 @needs_ffmpeg
@@ -358,7 +358,7 @@ def test_parallel_chains_seed_only_continuous_shots(settings, fake_client, monke
     app = create_app(settings, client_factory=fake_client, start_worker=False)
     client = TestClient(app)
     monkeypatch.setattr(fake_client, "storyboard", _bible_board(False, True, False, False))
-    project = _setup(client, continuity=True)
+    project = _setup(client, continuity=True, parallel_clips=True)
     pid = project["id"]
     client.post(f"/api/projects/{pid}/plan")
     _run_jobs(app)
@@ -380,7 +380,7 @@ def test_parallel_failure_stops_new_clips_and_keeps_finished_ones(settings, fake
     client = TestClient(app)
     monkeypatch.setattr(fake_client, "storyboard", _bible_board(False, False, False, False))
     monkeypatch.setattr(fake_client, "fail_prompts", ("shot 0",))
-    project = _setup(client, continuity=True)
+    project = _setup(client, continuity=True, parallel_clips=True)
     pid = project["id"]
     client.post(f"/api/projects/{pid}/plan")
     _run_jobs(app)
@@ -393,3 +393,55 @@ def test_parallel_failure_stops_new_clips_and_keeps_finished_ones(settings, fake
     assert states[0] == "failed" and "running" not in states
     # the failure stops the queue: at most the clip already in flight on the other lane finishes
     assert states.count("done") <= 1 and states.count("pending") >= 2
+
+
+@needs_ffmpeg
+def test_clips_run_one_at_a_time_unless_parallel_is_enabled(settings, fake_client, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    settings = dataclasses.replace(settings, clip_concurrency=2)
+    app = create_app(settings, client_factory=fake_client, start_worker=False)
+    client = TestClient(app)
+    monkeypatch.setattr(fake_client, "storyboard", _bible_board(False, False, False))
+    active, peak = [0], [0]
+    real = fake_client.generate_video
+
+    def tracking(self, *args, **kwargs):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        try:
+            return real(self, *args, **kwargs)
+        finally:
+            active[0] -= 1
+
+    monkeypatch.setattr(fake_client, "generate_video", tracking)
+    project = _setup(client, continuity=True)
+    assert project["options"]["parallel_clips"] is False
+    pid = project["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "succeeded", detail["jobs"][0]["message"]
+    assert peak[0] == 1
+
+
+@needs_ffmpeg
+def test_short_scene_requests_the_minimum_clip_length(settings, fake_client, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    app = create_app(settings, client_factory=fake_client, start_worker=False)
+    client = TestClient(app)
+    monkeypatch.setattr(fake_client, "storyboard", _bible_board(False))
+    project = _setup(client, continuity=True)
+    pid = project["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    # an older plan (or a manual edit) may still hold a 3 s scene
+    svc = app.state.services
+    scene = svc.repo.scenes(pid)[0]
+    svc.db.execute("UPDATE scenes SET duration = 3 WHERE id = ?", (scene["id"],))
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    assert [c[2] for c in fake_client.calls if c[0] == "video"] == [4]
