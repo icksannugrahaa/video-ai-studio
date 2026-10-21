@@ -255,3 +255,17 @@ def test_requeue_interrupted_resets_in_flight_clips(tmp_path):
     repo.update_scene(second["id"], clip_status="done")
     repo.requeue_interrupted()
     assert [s["clip_status"] for s in repo.scenes(pid)] == ["pending", "done"]
+
+
+def test_song_mode_clip_prompt_carries_the_lines_sung_in_that_shot():
+    options = {"bible_style": "3D", "music_prompt": "Kids pop, 120 BPM, ukulele",
+               "lyrics": "[Intro]\n[0:00] Hai teman\n[0:04] Satu, dua, tunjuk jari\n[0:06] Ikuti lagu ini\n[0:09] Ketuk"}
+    sung = planner.sung_direction(options, 4.0, 8.0)
+    assert '0s "Satu, dua, tunjuk jari"' in sung and '2s "Ikuti lagu ini"' in sung
+    assert "Hai teman" not in sung and "Ketuk" not in sung and "120 BPM" in sung
+    assert "Ikuti" not in planner.sung_direction(options, 8.0, 12.0)    # sung back in the previous shot
+    assert '0s "Hai teman"' in planner.sung_direction(options, 1.0, 3.5)  # nothing new: the carried line
+    prompt = planner.clip_prompt(options, "the character counts", sung=sung)
+    assert prompt.index("Shot:") < prompt.index("tunjuk jari") < prompt.index("No on-screen text")
+    assert planner.sung_direction({"music_prompt": "90 BPM"}, 0, 4).endswith("on the beat at 90 BPM.")
+    assert planner.sung_direction({}, 0, 4) == ""

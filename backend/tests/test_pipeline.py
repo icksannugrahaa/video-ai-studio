@@ -445,3 +445,67 @@ def test_short_scene_requests_the_minimum_clip_length(settings, fake_client, mon
     client.post(f"/api/projects/{pid}/render", json={"confirm": True})
     _run_jobs(app)
     assert [c[2] for c in fake_client.calls if c[0] == "video"] == [4]
+
+
+def _colour_clip(path, colours, rate=24):
+    """Clip made of solid-colour segments ``[(colour, seconds), ...]``."""
+    import subprocess
+    inputs = "".join(f"color=c={c}:s=64x64:r={rate}:d={d}[s{i}];" for i, (c, d) in enumerate(colours))
+    joins = "".join(f"[s{i}]" for i in range(len(colours)))
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-filter_complex",
+                    f"{inputs}{joins}concat=n={len(colours)}:v=1:a=0,format=yuv420p", "-c:v", "libx264",
+                    "-preset", "ultrafast", str(path)], check=True)
+    return path
+
+
+def _pixel(path, at=None):
+    import subprocess
+    seek = ["-ss", f"{at}"] if at is not None else []
+    out = subprocess.run(["ffmpeg", "-loglevel", "error", *seek, "-i", str(path), "-frames:v", "1", "-vf", "scale=1:1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return tuple(out[:3])
+
+
+@needs_ffmpeg
+def test_last_frame_is_the_real_last_frame(tmp_path):
+    clip = _colour_clip(tmp_path / "c.mp4", [("red", 1.0), ("blue", 0.084)])
+    r, g, b = _pixel(media.last_frame_png(clip, tmp_path / "last.png"))
+    assert b > 200 and r < 60
+
+
+@needs_ffmpeg
+def test_short_clip_is_padded_under_the_fade_not_at_the_cut(tmp_path):
+    clip = _colour_clip(tmp_path / "c.mp4", [("blue", 0.125), ("red", 0.75), ("green", 0.125)])
+    norm = media.normalize_clip(clip, tmp_path / "n.mp4", width=64, height=64, fps=24, seconds=1.25,
+                                keep_audio=False, preset="ultrafast", lead=0.25)
+    assert abs(media.duration(norm) - 1.25) < 0.1
+    assert _pixel(norm, 0.2)[2] > 200          # first frame held while the crossfade covers it
+    assert _pixel(norm, 0.95)[0] > 200         # still mid-clip (a tail freeze would show green here)
+    r, g, b = _pixel(norm, 1.2)                 # the clip's own ending plays up to the cut
+    assert g > 100 and r < 60
+
+
+@needs_ffmpeg
+def test_render_keeps_shared_clip_frame_rate(tmp_path):
+    from app.engine import render_fps
+    a = _colour_clip(tmp_path / "a.mp4", [("red", 0.5)], rate=24)
+    b = _colour_clip(tmp_path / "b.mp4", [("red", 0.5)], rate=24)
+    c = _colour_clip(tmp_path / "c.mp4", [("red", 0.5)], rate=25)
+    assert render_fps([a, b], 30) == 24
+    assert render_fps([a, c], 30) == 30        # mixed rates: one common output rate
+    assert render_fps([_colour_clip(tmp_path / "d.mp4", [("red", 0.5)], rate=60)], 30) == 30
+
+
+@needs_ffmpeg
+def test_continues_cut_lands_on_the_pose_the_next_clip_starts_from(tmp_path):
+    # the next clip was seeded 3 frames before the previous clip's end (blue, not the green tail)
+    prev = _colour_clip(tmp_path / "prev.mp4", [("red", 2.0), ("blue", 0.25), ("green", 0.125)])
+    nxt = _colour_clip(tmp_path / "next.mp4", [("blue", 0.5)])
+    keep = media.seam_frames(prev, nxt, fps=24)
+    assert keep == 54
+    norm = media.normalize_clip(prev, tmp_path / "n.mp4", width=64, height=64, fps=24, seconds=2.375,
+                                keep_audio=False, preset="ultrafast", keep_frames=keep)
+    assert abs(media.duration(norm) - 2.375) < 0.1      # slowed down a little, not shortened
+    r, g, b = _pixel(media.last_frame_png(norm, tmp_path / "last.png"))
+    assert b > 200 and g < 60                           # ends on blue: no jump back at the cut
+    assert media.seam_frames(nxt, _colour_clip(tmp_path / "n2.mp4", [("blue", 0.5)]), fps=24) is None

@@ -42,7 +42,10 @@ comes only from a fixed "bible" that the app prepends, word for word, to every c
   and weather progressing logically from scene to scene. No on-screen text, captions, logos or watermarks.
 - "continues": true when this shot continues the previous one in the same place and moment (the app then starts
   this clip from the last frame of the previous clip), false when the location or time changes. Group the story
-  into short sequences of 2-3 continuous shots per location; the first scene is always false.
+  into short sequences of 2-3 continuous shots per location; the first scene is always false. A continuing shot
+  starts exactly where the previous one ended, so keep its shot size and camera position (change them only with
+  a slow, continuous camera move such as "the camera slowly pushes in"); a different framing such as wide →
+  close-up needs "continues": false.
 - "narration": voice-over spoken during the scene, in {language}. At most {words} words per scene
   ({wps} words per second of duration). May be empty for purely visual moments.
 - "duration": seconds, integer between {min_s} and {max_s}.
@@ -65,15 +68,16 @@ visual_prompt in English without re-describing the bible, narration in {language
 BIBLE_KEYS = ("character", "world", "style")
 
 
-def clip_prompt(options: dict, visual_prompt: str) -> str:
-    """Final prompt for one clip: fixed bible + the shot. Projects planned
-    before the bible existed have empty bible fields and keep their prompt."""
+def clip_prompt(options: dict, visual_prompt: str, sung: str = "") -> str:
+    """Final prompt for one clip: fixed bible + the shot (+ in song mode what is
+    sung during it). Projects planned before the bible existed have empty bible
+    fields and keep their prompt."""
     style = (options.get("bible_style") or "").strip().rstrip(".")
     character = (options.get("bible_character") or "").strip().rstrip(".")
     world = (options.get("bible_world") or "").strip().rstrip(".")
     shot = (visual_prompt or "").strip()
     if not (style or character or world):
-        return shot
+        return f"{shot} {sung}".strip()
     parts = []
     if style:
         parts.append(f"{style}.")
@@ -82,8 +86,31 @@ def clip_prompt(options: dict, visual_prompt: str) -> str:
     if world:
         parts.append(f"Setting: {world}.")
     parts.append(f"Shot: {shot}")
+    if sung:
+        parts.append(sung)
     parts.append("No on-screen text, captions or watermarks.")
     return " ".join(parts)
+
+
+_BPM_RE = re.compile(r"(\d{2,3})\s*BPM", re.I)
+
+
+def sung_direction(options: dict, start: float, end: float) -> str:
+    """Song mode: lyric lines heard between ``start`` and ``end`` (timeline
+    seconds), timed from the clip's own start, plus the tempo — the video model
+    otherwise invents a generic dance that ignores the words and the beat."""
+    heard = [(s, text) for s, e, text in parse_lyrics(options.get("lyrics") or "", end) if e > start + 0.25]
+    # Lines starting in this shot; a line carried over from the previous shot
+    # only when nothing new starts here (it was mostly sung back there).
+    lines = [(s - start, text) for s, text in heard if s >= start - 0.25] or [(0.0, t) for _, t in heard[-1:]]
+    bpm = _BPM_RE.search(options.get("music_prompt") or "")
+    tempo = f" at {bpm.group(1)} BPM" if bpm else ""
+    if not lines:
+        return f"Music plays (instrumental); the character moves on the beat{tempo}." if tempo else ""
+    timed = "; ".join(f'{t:.0f}s "{text}"' for t, text in lines)
+    return (f"A song is sung during this shot ({timed}): the character sings along and acts out each line with "
+            f"clear matching gestures exactly when it is sung (counting = holding up that many fingers), "
+            f"moving on the beat{tempo}.")
 
 
 def has_bible(options: dict) -> bool:

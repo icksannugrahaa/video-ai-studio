@@ -51,6 +51,15 @@ def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[li
     return chains
 
 
+def render_fps(clips: list[Path], default: int) -> float:
+    """Keep the clips' own frame rate when they share one at or below the
+    configured rate: converting 24 fps clips to 30 fps repeats every 4th frame,
+    which shows as a steady stutter."""
+    rates = {round(media.video_fps(c), 3) for c in clips if c.exists()}
+    rate = rates.pop() if len(rates) == 1 else 0.0
+    return rate if 0 < rate <= default else float(default)
+
+
 def scene_transitions(scenes: list[dict], lengths: list[float], options: dict) -> list[float]:
     """Crossfade seconds after each scene (last is 0). A shot that continues the
     previous one already starts from its last frame, so it gets a hard cut;
@@ -347,7 +356,8 @@ class Engine:
         for attempt in range(1, CLIP_ATTEMPTS + 1):
             try:
                 video = client.generate_video(
-                    profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"]),
+                    profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
+                                                                sung=self._sung_during(project, scene)),
                     seconds=max(int(round(scene["duration"])), planner.min_clip_seconds(int(profile["clip_seconds"]))),
                     aspect_ratio=preset["model_aspect"], image_png=seed,
                     enable_audio=bool(project["options"].get("keep_clip_audio")),
@@ -377,6 +387,34 @@ class Engine:
                 self._sleep(job, delay)
         self.repo.update_scene(scene["id"], clip_status="failed", clip_error=(last_error or "gagal")[:300])
         raise JobFailed(f"Scene {scene['idx'] + 1} gagal: {last_error}")
+
+    def _seam(self, project: dict, scenes: list[dict], i: int, ws) -> int | None:
+        """Frames of clip ``i`` to keep so it ends where the next, seeded clip
+        starts (see :func:`media.seam_frames`); ``None`` = keep everything."""
+        if i + 1 >= len(scenes) or not project["options"].get("continuity"):
+            return None
+        nxt = scenes[i + 1]
+        if not (nxt.get("continues") or not planner.has_bible(project["options"])):
+            return None  # not seeded from this clip
+        if nxt["idx"] != scenes[i]["idx"] + 1 or not nxt.get("clip_file"):
+            return None  # partial preview with a gap: the clips are not neighbours
+        try:
+            return media.seam_frames(ws.path(scenes[i]["clip_file"]), ws.path(nxt["clip_file"]),
+                                     fps=media.video_fps(ws.path(scenes[i]["clip_file"])) or 24.0)
+        except media.MediaError:
+            return None
+
+    def _sung_during(self, project: dict, scene: dict) -> str:
+        """Song mode: the lyric lines (and tempo) heard during this scene, so the
+        clip acts out what is sung instead of a generic dance."""
+        if not self._is_song(project):
+            return ""
+        start = 0.0
+        for other in sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"]):
+            if other["idx"] == scene["idx"]:
+                break
+            start += float(other["duration"])
+        return planner.sung_direction(project["options"], start, start + float(scene["duration"]))
 
     @staticmethod
     def _is_song(project: dict) -> bool:
@@ -448,6 +486,7 @@ class Engine:
             info = {} if song else (scene.get("narration_info") or {})
             lengths.append(round(max(float(scene["duration"]), float(info.get("duration") or 0) + NARRATION_TAIL), 2))
         fades = scene_transitions(scenes, lengths, opts) if media.has_filter("xfade") else [0.0] * len(scenes)
+        fps = render_fps([ws.path(s["clip_file"]) for s in scenes if s.get("clip_file")], settings.render_fps)
         p_start = max(0.3, self.repo.job(job["id"])["progress"])
         for n, scene in enumerate(scenes, 1):
             self._progress(job, p_start + (0.92 - p_start) * (n - 1) / len(scenes),
@@ -456,16 +495,20 @@ class Engine:
             seconds = lengths[n - 1]
             # Faded sides need half a fade of extra picture (fades are centred on the cut).
             clip_seconds = media.crossfade_clip_seconds(lengths, fades, n - 1)
-            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{preset['width']}x{preset['height']}|"
-                               f"{settings.render_fps}|{keep_audio}".encode()).hexdigest()[:10]
+            lead = fades[n - 2] / 2 if n > 1 else 0.0
+            keep_frames = self._seam(project, scenes, n - 1, ws)
+            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|"
+                               f"{preset['width']}x{preset['height']}|"
+                               f"{fps:g}|{keep_audio}".encode()).hexdigest()[:10]
             norm = ws.path("norm", f"scene_{scene['idx']}_{key}.mp4")
             if not norm.exists():
                 # Write under a unique name then rename: a preview and a render may
                 # normalise the same clip at the same moment.
                 part = norm.with_name(f"{norm.stem}.{uuid.uuid4().hex[:8]}.part.mp4")
                 media.normalize_clip(ws.path(scene["clip_file"]), part, width=preset["width"],
-                                     height=preset["height"], fps=settings.render_fps, seconds=clip_seconds,
-                                     keep_audio=keep_audio, preset=settings.ffmpeg_preset)
+                                     height=preset["height"], fps=fps, seconds=clip_seconds,
+                                     keep_audio=keep_audio, preset=settings.ffmpeg_preset, lead=lead,
+                                     keep_frames=keep_frames)
                 os.replace(part, norm)
             norm_clips.append(norm)
             narr_src = ws.path(scene["narration_file"]) if scene.get("narration_file") and not song else None
