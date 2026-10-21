@@ -81,7 +81,10 @@ def _bible_options(board: dict) -> dict:
     """Project option updates for a planner result's bible (empty fields skipped,
     so an edit that drops the bible keeps the stored one)."""
     bible = board.get("bible") or {}
-    return {f"bible_{key}": bible[key] for key in planner.BIBLE_KEYS if bible.get(key)}
+    options = {f"bible_{key}": bible[key] for key in planner.BIBLE_KEYS if bible.get(key)}
+    if board.get("concept"):  # what the video promises: edits keep building on it
+        options["concept"] = board["concept"]
+    return options
 
 
 class JobCanceled(Exception):
@@ -153,7 +156,7 @@ class Engine:
         board = planner.plan_storyboard(
             client, profile["chat_model"], prompt=project["prompt"], language=project["language"],
             clip_seconds=int(profile["clip_seconds"]), target_seconds=int(project["target_seconds"]),
-            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"],
+            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
         )
         diff = self.repo.replace_scenes(project["id"], board["scenes"])
         update = {"status": "planned"}
@@ -221,6 +224,7 @@ class Engine:
             return {**diff, **self._render(job, project, profile, client, preset, start=0.1)}
         opts = project["options"]
         current = {"title": project["title"],
+                   "concept": opts.get("concept") or {},
                    "bible": {key: opts.get(f"bible_{key}") or "" for key in planner.BIBLE_KEYS},
                    "scenes": [{"visual_prompt": s["visual_prompt"], "continues": s["continues"],
                                "narration": s["narration"], "duration": s["duration"]}
@@ -229,7 +233,7 @@ class Engine:
         board = planner.edit_storyboard(
             client, profile["chat_model"], storyboard=current, instruction=instruction,
             language=project["language"], clip_seconds=int(profile["clip_seconds"]),
-            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"],
+            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
         )
         diff = self.repo.replace_scenes(project["id"], board["scenes"])
         options = _bible_options(board)

@@ -18,10 +18,28 @@ MIN_CLIP_SECONDS = 4
 
 _SYSTEM = """You are a short-form video director. Plan a video as a sequence of scenes.
 Each scene becomes ONE separately generated AI video clip. Clips are generated independently, so consistency
-comes only from a fixed "bible" that the app prepends, word for word, to every clip prompt:
+comes only from a fixed "bible" that the app prepends, word for word, to every clip prompt.
+
+First turn the idea — however short or vague — into a concrete "concept" (English) and build every scene on it:
+- "promise": the one thing the viewer must get from this video, as the title would promise it (e.g. "counting
+  from 1 to 5 with fruit", "how a seed grows into a plant", "a cat's funny morning routine").
+- "beats": the ordered steps that deliver the promise, one per scene, with no filler. For learning videos pick a
+  clear, age-appropriate scope (e.g. counting 1-5, not 1-100) and teach it step by step with repetition: show
+  it, say it, then recap it at the end.
+Make the promise VISIBLE in every scene, not only spoken: the visual_prompt names the exact objects and how many
+there are, and the action that demonstrates the step (counting = the character touches or picks up each object
+one by one as it is counted, then holds up that many fingers). Keep counted objects few (at most 5), large,
+identical and clearly separated so the video model can render them; never rely on on-screen numbers or text.
+The narration says exactly what is shown at that moment (the same number, the same object).
+At most one intro scene and one closing/recap scene; every other scene delivers a beat.
+One clear main action per scene (4-5 seconds is too short for more), described with concrete body movement.
 
 "bible" (English):
-- "character": the main character, 40-80 words, written once and never varied. Concrete, unambiguous traits:
+
+"bible" (English):
+- "character": the main character, 40-80 words — or, when the idea asks for several characters, a cast of 2-3,
+  each with a name and 30-50 words of clearly different traits (refer to them by name in the scenes) — written
+  once and never varied. Concrete, unambiguous traits:
   species/type, age, body shape and size, fur/skin/hair colour and exact pattern, eye colour, one or two unique
   markings, clothing/accessory with exact colour, pattern and where it is worn. Make it ORIGINAL and clearly
   different from famous copyrighted characters (e.g. Garfield, Disney/Pixar/DreamWorks characters).
@@ -37,8 +55,8 @@ comes only from a fixed "bible" that the app prepends, word for word, to every c
 
 "scenes": each scene has
 - "visual_prompt": English, ONLY what is specific to this shot: the exact spot inside the world, what the character
-  does, camera shot size and movement, time of day and lighting. Refer to the character as "the character"; do
-  NOT re-describe the character, the world or the style (the bible is added automatically). Keep the time of day
+  does, camera shot size and movement, time of day and lighting. Refer to the character as "the character" (or
+  the cast by their names); do NOT re-describe the character, the world or the style (the bible is added automatically). Keep the time of day
   and weather progressing logically from scene to scene. No on-screen text, captions, logos or watermarks.
 - "continues": true when this shot continues the previous one in the same place and moment (the app then starts
   this clip from the last frame of the previous clip), false when the location or time changes. Group the story
@@ -54,12 +72,19 @@ Also write "music_prompt": an English prompt for an AI music generator (backgrou
 genre, mood, tempo in BPM, main instruments, "instrumental, no vocals", the exact total length of the video
 (e.g. "full length 3:00"), and a short structure that follows the story with timestamps (e.g. "0:00-0:20 calm
 intro, 0:20-1:30 playful build, ... 2:45-3:00 gentle outro with a soft fade-out ending").
+If the idea asks for a song, lyrics, a sing-along or movements to music, the narration of each scene is the sung
+lyric for that scene instead of a voice-over: short rhythmic lines that carry the beat (the counting words, the
+names), a repeated catchy chorus line, and the visual_prompt shows the character doing exactly what the words
+say, moving on the beat. {song}
+The title must state the promise (e.g. "Ayo Berhitung 1 sampai 5 dengan Apel"), in {language}.
 Reply with JSON only, no prose, no markdown:
-{{"title": "...", "music_prompt": "...", "bible": {{"character": "...", "world": "...", "style": "..."}},
+{{"title": "...", "concept": {{"promise": "...", "beats": ["..."]}}, "music_prompt": "...",
+"bible": {{"character": "...", "world": "...", "style": "..."}},
 "scenes": [{{"visual_prompt": "...", "continues": false, "narration": "...", "duration": 5}}]}}"""
 
 _EDIT = """You edit an existing video storyboard. Apply the user's instruction and return the COMPLETE
-updated storyboard in the same JSON format, including "bible". Keep unchanged scenes exactly as they are (same
+updated storyboard in the same JSON format, including "concept" and "bible". Keep the concept's promise unless
+the instruction changes what the video is about. Keep unchanged scenes exactly as they are (same
 text and same "continues"), so only the scenes that really change get regenerated. Keep the bible word for word
 unless the instruction explicitly changes the character, the world or the style. Same rules as before:
 visual_prompt in English without re-describing the bible, narration in {language}, duration integer between
@@ -122,15 +147,20 @@ class PlanError(ValueError):
 
 
 def extract_json(text: str) -> dict:
-    """Parse the first JSON object in an LLM reply (tolerates code fences/prose)."""
+    """Parse the first JSON object in an LLM reply (tolerates code fences/prose
+    and trailing commas — a common LLM slip in long replies)."""
     cleaned = re.sub(r"```(?:json)?", "", text or "").strip()
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end <= start:
         raise PlanError("model tidak mengembalikan JSON storyboard")
+    body = cleaned[start:end + 1]
     try:
-        data = json.loads(cleaned[start:end + 1])
-    except ValueError as exc:
-        raise PlanError("JSON storyboard tidak valid") from exc
+        data = json.loads(body)
+    except ValueError:
+        try:
+            data = json.loads(re.sub(r",\s*([}\]])", r"\1", body))
+        except ValueError as exc:
+            raise PlanError("JSON storyboard tidak valid") from exc
     if not isinstance(data, dict):
         raise PlanError("JSON storyboard tidak valid")
     return data
@@ -166,12 +196,22 @@ def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
         raise PlanError("storyboard kosong")
     raw_bible = data.get("bible") if isinstance(data.get("bible"), dict) else {}
     bible = {key: str(raw_bible.get(key) or "").strip()[:1200] for key in BIBLE_KEYS}
+    raw_concept = data.get("concept") if isinstance(data.get("concept"), dict) else {}
+    beats = raw_concept.get("beats") if isinstance(raw_concept.get("beats"), list) else []
+    concept = {"promise": str(raw_concept.get("promise") or "").strip()[:300],
+               "beats": [str(b).strip()[:200] for b in beats if str(b).strip()][:30]}
     return {"title": str(data.get("title") or "").strip()[:120], "scenes": scenes, "bible": bible,
+            "concept": concept if concept["promise"] else {},
             "music_prompt": str(data.get("music_prompt") or "").strip()[:2000]}
 
 
-def _rules(language: str, clip_seconds: int, target: int, limit: int, aspect: str) -> dict:
+_SONG_MODE = ("This project is a music video with a sung song: write every narration as sung lyrics, and make the "
+              "music_prompt a song (vocals) rather than instrumental background music.")
+
+
+def _rules(language: str, clip_seconds: int, target: int, limit: int, aspect: str, song: bool = False) -> dict:
     return {
+        "song": _SONG_MODE if song else "",
         "language": language, "min_s": min_clip_seconds(clip_seconds), "max_s": clip_seconds,
         "words": int(clip_seconds * WORDS_PER_SECOND), "wps": WORDS_PER_SECOND,
         "target": target, "limit": limit, "aspect": aspect,
@@ -200,15 +240,15 @@ def _ask_json(client, model: str, instructions: str, request: str, temperature: 
 
 
 def plan_storyboard(client, model: str, *, prompt: str, language: str, clip_seconds: int,
-                    target_seconds: int, limit_seconds: int, aspect: str) -> dict:
-    rules = _rules(language, clip_seconds, min(target_seconds, limit_seconds), limit_seconds, aspect)
+                    target_seconds: int, limit_seconds: int, aspect: str, song: bool = False) -> dict:
+    rules = _rules(language, clip_seconds, min(target_seconds, limit_seconds), limit_seconds, aspect, song)
     data = _ask_json(client, model, _SYSTEM.format(**rules), "Video idea: " + prompt, temperature=0.7)
     return normalize(data, clip_seconds=clip_seconds, limit_seconds=limit_seconds)
 
 
 def edit_storyboard(client, model: str, *, storyboard: dict, instruction: str, language: str,
-                    clip_seconds: int, limit_seconds: int, aspect: str) -> dict:
-    rules = _rules(language, clip_seconds, limit_seconds, limit_seconds, aspect)
+                    clip_seconds: int, limit_seconds: int, aspect: str, song: bool = False) -> dict:
+    rules = _rules(language, clip_seconds, limit_seconds, limit_seconds, aspect, song)
     instructions = _SYSTEM.format(**rules) + "\n\n" + _EDIT.format(**rules)
     request = ("Current storyboard:\n" + json.dumps(storyboard, ensure_ascii=False)
                + "\n\nInstruction: " + instruction)
@@ -244,8 +284,11 @@ _SONG = """You are a songwriter for short videos. Write an original song whose l
 Lyrics language: {language}. Total length {length} ({total} seconds). Group scenes into sections
 (e.g. Intro (instrumental), Verse 1, Chorus, Verse 2, Chorus, Bridge, Final Chorus, Outro). The chorus may repeat.
 Every lyric line has "t": the second (from 0) it starts, placed inside the time range of the scenes it describes,
-at least 2.5 seconds apart, lines short and singable (max 9 words), with rhymes. Leave the last 5-8 seconds
-for an instrumental outro. {hint}
+at least 2.5 seconds apart, lines short and singable (max 9 words), with rhymes. Each scene's first line starts
+at that scene's start second, so picture and words change together. Build each scene's lines from its text below
+(when it is already a lyric, keep it nearly word for word) and keep the learning content exact: the same numbers,
+names and objects at the same moment the scene shows them. Leave the last 5-8 seconds for an instrumental outro,
+unless the video is shorter than 40 seconds (then at most 2-3 seconds). {hint}
 "style": English music style for the generator (genre, mood, tempo BPM, instruments).
 "vocal": English vocal description (e.g. "cheerful young female vocal").
 Reply with JSON only:

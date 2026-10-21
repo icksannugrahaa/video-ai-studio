@@ -35,7 +35,7 @@ def test_extract_json_and_normalize():
     reply = 'Sure!\n```json\n{"title":"T","scenes":[{"visual_prompt":"a","narration":"n","duration":12},' \
             '{"visual_prompt":"","duration":3},{"visual_prompt":"b","duration":"x"}]}\n```'
     board = planner.normalize(planner.extract_json(reply), clip_seconds=5, limit_seconds=60)
-    assert board == {"title": "T", "music_prompt": "", "bible": {"character": "", "world": "", "style": ""},
+    assert board == {"title": "T", "music_prompt": "", "bible": {"character": "", "world": "", "style": ""}, "concept": {},
                      "scenes": [
         {"visual_prompt": "a", "narration": "n", "duration": 5.0, "continues": False},
         {"visual_prompt": "b", "narration": "", "duration": 5.0, "continues": False},
@@ -43,6 +43,7 @@ def test_extract_json_and_normalize():
     capped = planner.normalize({"scenes": [{"visual_prompt": "x", "duration": 5}] * 5}, clip_seconds=5,
                                limit_seconds=12)
     assert len(capped["scenes"]) == 2
+    assert planner.extract_json('{"a": [1, 2,], "b": {"c": "x"},}') == {"a": [1, 2], "b": {"c": "x"}}
     with pytest.raises(planner.PlanError):
         planner.extract_json("no json here")
     with pytest.raises(planner.PlanError):
@@ -269,3 +270,23 @@ def test_song_mode_clip_prompt_carries_the_lines_sung_in_that_shot():
     assert prompt.index("Shot:") < prompt.index("tunjuk jari") < prompt.index("No on-screen text")
     assert planner.sung_direction({"music_prompt": "90 BPM"}, 0, 4).endswith("on the beat at 90 BPM.")
     assert planner.sung_direction({}, 0, 4) == ""
+
+
+def test_planner_asks_for_a_visible_concept_and_keeps_it():
+    sent = []
+
+    class Chat:
+        def chat(self, model, messages, temperature=0.7, max_tokens=4096):
+            sent.append(messages[-1]["content"])
+            return ('{"title": "Ayo Berhitung 1 sampai 3", "concept": {"promise": "counting 1 to 3 with apples",'
+                    ' "beats": ["one apple", "two apples", " ", "three apples"]},'
+                    ' "scenes": [{"visual_prompt": "the character picks up exactly one red apple", "duration": 4}]}')
+
+    board = planner.plan_storyboard(Chat(), "m", prompt="video berhitung", language="id-ID", clip_seconds=5,
+                                    target_seconds=10, limit_seconds=60, aspect="9:16", song=True)
+    assert board["concept"] == {"promise": "counting 1 to 3 with apples",
+                                "beats": ["one apple", "two apples", "three apples"]}
+    assert "VISIBLE in every scene" in sent[0] and "music video with a sung song" in sent[0]
+    planner.plan_storyboard(Chat(), "m", prompt="x", language="id-ID", clip_seconds=5,
+                            target_seconds=10, limit_seconds=60, aspect="9:16")
+    assert "music video with a sung song" not in sent[1]
