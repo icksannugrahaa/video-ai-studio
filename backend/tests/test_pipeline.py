@@ -533,3 +533,41 @@ def test_long_section_bounces_the_clip_and_trailing_silence_is_ignored(tmp_path)
                    check=True)
     assert 1.9 < media.audible_end(song) < 2.2
 
+
+
+@needs_ffmpeg
+def test_song_render_writes_missing_lyrics_and_prompt_first(app, client, fake_client):
+    project = _setup(client, music_style="song", music_mode="external")
+    pid = project["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    client.patch(f"/api/projects/{pid}", json={"options": {"music_prompt": ""}})
+    fake_client.calls.clear()
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "succeeded", detail["jobs"][0]["message"]
+    assert "Kucing kecil terbang tinggi" in detail["options"]["lyrics"]
+    assert "Lyrics:" in detail["options"]["music_prompt"]
+    kinds = [c[0] for c in fake_client.calls]
+    assert kinds.index("chat") < kinds.index("video")  # written before any billed clip
+    video = next(c for c in fake_client.calls if c[0] == "video")
+    assert "Kucing kecil terbang tinggi" in video[1]
+
+
+@needs_ffmpeg
+def test_song_render_keeps_user_lyrics_and_only_fills_the_prompt(app, client, fake_client):
+    project = _setup(client, music_style="song", music_mode="external")
+    pid = project["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    mine = "[0:00] Lirik buatan saya"
+    client.patch(f"/api/projects/{pid}", json={"options": {"lyrics": mine, "music_prompt": ""}})
+    fake_client.calls.clear()
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "succeeded", detail["jobs"][0]["message"]
+    assert detail["options"]["lyrics"] == mine
+    assert mine in detail["options"]["music_prompt"]
+    assert "chat" not in [c[0] for c in fake_client.calls]

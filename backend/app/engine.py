@@ -268,6 +268,7 @@ class Engine:
         ws = Workspace(self.settings.projects_dir, project["id"])
         self.repo.update_project(job["user_id"], project["id"], {"status": "rendering"})
         try:
+            project = self._ensure_song(job, project, profile, client, scenes)
             self._generate_clips(job, project, profile, client, preset, scenes, ws, start, 0.65)
             scenes = self.repo.scenes(project["id"])
             if not self._is_song(project):  # song mode: the lyrics are the voice, no TTS
@@ -283,15 +284,36 @@ class Engine:
         self.repo.update_project(job["user_id"], project["id"], {"status": "done"})
         return result
 
+    def _ensure_song(self, job, project, profile, client, scenes) -> dict:
+        """Song mode: fill in missing lyrics / music prompt before any clip is billed,
+        since each clip is directed by the lines sung during it. Lyrics the user
+        already has are kept."""
+        opts = project["options"]
+        if not self._is_song(project):
+            return project
+        lyrics, prompt = (opts.get("lyrics") or "").strip(), (opts.get("music_prompt") or "").strip()
+        if lyrics and prompt:
+            return project
+        if lyrics:
+            total = int(round(sum(float(s["duration"]) for s in scenes)))
+            update = {"music_prompt": planner.song_prompt(
+                style=f'Song for the video "{project["title"] or project["prompt"][:80]}"', vocal="",
+                lyrics=lyrics, total=total)}
+        else:
+            if not profile["chat_model"]:
+                raise JobFailed("profil belum memilih model chat (dibutuhkan untuk membuat lirik)")
+            self._progress(job, self.repo.job(job["id"])["progress"], "Menulis lirik & prompt musik…")
+            update = planner.song_plan(client, profile["chat_model"], title=project["title"], scenes=scenes,
+                                       language=project["language"])
+        self.repo.update_project(job["user_id"], project["id"], {"options": update})
+        return self.repo.project(job["user_id"], project["id"]) or project
+
     # clips ------------------------------------------------------------
     def _generate_clips(self, job, project, profile, client, preset, scenes, ws, p0, p1) -> None:
         todo_ids = {s["id"] for s in scenes if not (s["clip_status"] == "done" and s["clip_version"] == s["version"]
                                                      and s["clip_file"] and ws.path(s["clip_file"]).exists())}
         if not todo_ids:
             return
-        if self._is_song(project) and not project["options"].get("lyrics"):
-            # Clips act out the sung lines: without lyrics they are billed for nothing.
-            raise JobFailed("mode lagu: buat lirik dulu di panel Musik sebelum generate clip")
         continuity = bool(project["options"].get("continuity"))
         # With a story bible the planner marks which shots continue the previous
         # one; only those start from its last frame (a new location must not
