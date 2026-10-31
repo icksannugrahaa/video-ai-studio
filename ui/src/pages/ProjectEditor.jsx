@@ -10,6 +10,7 @@ import Storyboard from '../components/editor/Storyboard.jsx';
 import SummaryCard from '../components/editor/SummaryCard.jsx';
 import { isActive, sceneState, totalSeconds } from '../components/editor/shared.js';
 import { useT } from '../i18n.jsx';
+import { alertHidden, askNotifyPermission, pickNotice } from '../components/editor/notify.js';
 
 const EDIT_EXAMPLES = ['editor.ex1', 'editor.ex2', 'editor.ex3', 'editor.ex4'];
 
@@ -124,7 +125,8 @@ export default function ProjectEditor({ projectId }) {
   const previewBusy = isActive(previewJob);
   // Always poll: fast while a job runs, slow otherwise so jobs started elsewhere show up.
   React.useEffect(() => {
-    const timer = setInterval(() => { if (!document.hidden) load(); }, active || previewBusy ? 3000 : 15000);
+    // A running job keeps polling in a hidden tab, or nobody could be told it finished.
+    const timer = setInterval(() => { if (!document.hidden || active || previewBusy) load(); }, active || previewBusy ? 3000 : 15000);
     return () => clearInterval(timer);
   }, [active?.id, previewBusy, load]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -147,9 +149,22 @@ export default function ProjectEditor({ projectId }) {
   const hasFinal = project?.files.includes('final.mp4');
   const prevFinal = React.useRef(hasFinal);
   React.useEffect(() => {
-    if (hasFinal && prevFinal.current === false) { setSource('final'); toast(t('editor.finalReady'), 'ok'); }
+    if (hasFinal && prevFinal.current === false) setSource('final');
     prevFinal.current = hasFinal;
-  }, [hasFinal, toast]);
+  }, [hasFinal]);
+
+  // Storyboard / clips / final video ready, or the job failed → tell the user.
+  const seen = React.useRef(null);
+  React.useEffect(() => {
+    if (!project) return;
+    const notice = pickNotice(seen.current, project);
+    if (notice) {
+      const message = t(notice.key);
+      toast(notice.msg ? `${message} ${notice.msg}` : message, notice.tone);
+      alertHidden(project.title || t('notify.appName'), notice.msg ? `${message} ${notice.msg}` : message);
+    }
+    seen.current = { jobId: project.active_job?.id, ready: project.clips_ready, total: project.scenes.length };
+  }, [project]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Unsaved storyboard: warn before leaving, Ctrl/Cmd+S to save.
   const saveRef = React.useRef(null);
@@ -240,6 +255,7 @@ export default function ProjectEditor({ projectId }) {
 
   async function startRender(resume) {
     if (dirty) { toast(t('editor.saveFirst'), 'bad'); return; }
+    askNotifyPermission();
     let estimate;
     try {
       ({ estimate } = await api.post(`/projects/${projectId}/render`, {}));
@@ -268,6 +284,7 @@ export default function ProjectEditor({ projectId }) {
   }
 
   async function plan() {
+    askNotifyPermission();
     if (project.scenes.length && !(await dialog.confirm({
       title: t('editor.replanTitle'),
       body: t('editor.replanBody'),
