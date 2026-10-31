@@ -366,7 +366,7 @@ def test_parallel_chains_seed_only_continuous_shots(settings, fake_client, monke
     _run_jobs(app)
     detail = client.get(f"/api/projects/{pid}").json()
     assert detail["jobs"][0]["status"] == "succeeded", detail["jobs"][0]["message"]
-    seeded = {c[1].split("Shot: ")[1].split(" No on-screen")[0]: c[4] for c in fake_client.calls if c[0] == "video"}
+    seeded = {c[1].split("Shot: ")[1][:6]: c[4] for c in fake_client.calls if c[0] == "video"}
     assert seeded == {"shot 0": False, "shot 1": True, "shot 2": False, "shot 3": False}
     assert all(s["clip_status"] == "done" for s in detail["scenes"])
 
@@ -509,3 +509,27 @@ def test_continues_cut_lands_on_the_pose_the_next_clip_starts_from(tmp_path):
     r, g, b = _pixel(media.last_frame_png(norm, tmp_path / "last.png"))
     assert b > 200 and g < 60                           # ends on blue: no jump back at the cut
     assert media.seam_frames(nxt, _colour_clip(tmp_path / "n2.mp4", [("blue", 0.5)]), fps=24) is None
+
+
+def test_retime_fills_the_section_and_seam_break_is_detected(tmp_path):
+    prev = _colour_clip(tmp_path / "a.mp4", [("red", 1.0)])
+    nxt = _colour_clip(tmp_path / "b.mp4", [("blue", 1.0)])
+    assert media.seam_broken(prev, nxt) is True
+    assert media.seam_broken(prev, prev) is False
+    norm = media.normalize_clip(prev, tmp_path / "n.mp4", width=64, height=64, fps=24, seconds=1.25,
+                                keep_audio=False, retime=1.25)
+    assert abs(media.duration(norm) - 1.25) < 0.1
+
+
+def test_long_section_bounces_the_clip_and_trailing_silence_is_ignored(tmp_path):
+    clip = _colour_clip(tmp_path / "a.mp4", [("red", 1.0)])
+    norm = media.normalize_clip(clip, tmp_path / "n.mp4", width=64, height=64, fps=24, seconds=3.0,
+                                keep_audio=False, retime=3.0)
+    assert abs(media.duration(norm) - 3.0) < 0.1
+    import subprocess
+    song = tmp_path / "s.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=2", "-f", "lavfi",
+                    "-i", "anullsrc=r=44100:cl=mono:d=2", "-filter_complex", "[0][1]concat=n=2:v=0:a=1", str(song)],
+                   check=True)
+    assert 1.9 < media.audible_end(song) < 2.2
+

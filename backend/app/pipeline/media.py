@@ -8,6 +8,7 @@ tracks are PCM 48 kHz so timelines stay sample-exact.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -68,6 +69,19 @@ def video_fps(path: Path) -> float:
     return 0.0
 
 
+def audible_end(path: Path) -> float:
+    """Where the sound really ends: generated songs often close with seconds of
+    silence that must not become a frozen end of the video."""
+    length = duration(path)
+    proc = subprocess.run([ffmpeg_bin(), "-hide_banner", "-i", str(path), "-af", "silencedetect=n=-40dB:d=0.5",
+                           "-f", "null", "-"], capture_output=True, timeout=_TIMEOUT)
+    starts = re.findall(r"silence_start: ([\d.]+)", proc.stderr.decode("utf-8", "replace"))
+    ends = re.findall(r"silence_end: ([\d.]+)", proc.stderr.decode("utf-8", "replace"))
+    if starts and (len(ends) < len(starts) or float(ends[-1]) >= length - 0.1):
+        return round(float(starts[-1]), 3)
+    return round(length, 3)
+
+
 def has_audio(path: Path) -> bool:
     return any(s.get("codec_type") == "audio" for s in probe(path).get("streams") or [])
 
@@ -125,9 +139,20 @@ def seam_frames(prev: Path, nxt: Path, *, window: float = 0.6, fps: float = 24.0
     return k + 1
 
 
+SEAM_BREAK = 15.0  # mean grey difference (0-255): clearly another picture, seen 33 vs 6 for a good seam
+
+
+def seam_broken(prev: Path, nxt: Path) -> bool:
+    """Whether a seeded clip visibly ignored its seed (a hard cut would jump)."""
+    frames, first = _grey_frames(prev), _grey_frames(nxt, first_only=True)
+    if not frames or not first:
+        return False
+    return sum(abs(x - y) for x, y in zip(frames[-1], first[0])) / len(first[0]) > SEAM_BREAK
+
+
 def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float, seconds: float,
                    keep_audio: bool, preset: str = "veryfast", lead: float = 0.0,
-                   keep_frames: int | None = None) -> Path:
+                   keep_frames: int | None = None, retime: float | None = None) -> Path:
     """Scale/crop ``src`` to fill ``width``×``height``, pad it to ``seconds``
     and always emit a stereo AAC track (silent if needed).
 
@@ -137,7 +162,10 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     shows as a stall.
 
     ``keep_frames`` (from :func:`seam_frames`) drops the frames after the seam
-    and slows the rest down a little so the clip keeps its length."""
+    and slows the rest down a little so the clip keeps its length. ``retime``
+    plays the clip over that many seconds, so it fills a sung section without
+    a frozen tail (kept to a speed change that still looks natural); a section
+    too long for that plays the clip forward and back instead of freezing."""
     src_seconds = duration(src)
     stretch = ""
     if keep_frames:
@@ -145,12 +173,22 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
         factor = src_seconds / kept if kept else 1.0
         if 1.0 < factor <= 1.15:  # ≤ 15 % slower is not noticeable; more would be
             stretch = f"trim=end_frame={keep_frames},setpts=(PTS-STARTPTS)*{factor:.5f},"
+    bounce = ""
+    if retime and src_seconds and 0.9 <= retime / src_seconds <= 1.6:
+        stretch = f"setpts=(PTS-STARTPTS)*{retime / src_seconds:.5f},"
+        src_seconds = retime
+    elif retime and src_seconds and retime / src_seconds > 1.6:
+        factor = min(1.6, max(1.0, retime / (2 * src_seconds)))
+        # After scaling: reverse buffers every frame, keep that small on a phone.
+        bounce = (f"split[fwd][back];[back]reverse[rev];[fwd][rev]concat=n=2:v=1:a=0,"
+                  f"setpts=(PTS-STARTPTS)*{factor:.5f},fps={fps:g},")
+        src_seconds = 2 * src_seconds * factor
     missing = max(0.0, seconds - src_seconds)
     head = min(missing, max(0.0, lead))
     pad = missing - head + 0.1
     tpad = f"tpad=start_mode=clone:start_duration={head:.3f}:" if head > 0 else "tpad="
     vf = (f"{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
-          f"setsar=1,fps={fps:g},{tpad}stop_mode=clone:stop_duration={pad:.3f}")
+          f"setsar=1,fps={fps:g},{bounce}{tpad}stop_mode=clone:stop_duration={pad:.3f}")
     args: list = ["-i", src]
     if keep_audio and has_audio(src):
         audio = ["-map", "0:a:0", "-af", f"aresample={AUDIO_RATE},apad"]

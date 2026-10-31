@@ -20,6 +20,11 @@ _SYSTEM = """You are a short-form video director. Plan a video as a sequence of 
 Each scene becomes ONE separately generated AI video clip. Clips are generated independently, so consistency
 comes only from a fixed "bible" that the app prepends, word for word, to every clip prompt.
 
+The idea may be one short, plain sentence: treat it as a client brief and direct it like a professional production.
+Keep everything the user asked for exactly (characters, topic, place, style, language); decide everything they left
+open: audience, tone, the hook of the first seconds, how the video builds, and how it ends. The result must feel
+filmed and edited by a professional crew, with every shot having a reason to exist.
+
 First turn the idea — however short or vague — into a concrete "concept" (English) and build every scene on it:
 - "promise": the one thing the viewer must get from this video, as the title would promise it (e.g. "counting
   from 1 to 5 with fruit", "how a seed grows into a plant", "a cat's funny morning routine").
@@ -27,14 +32,15 @@ First turn the idea — however short or vague — into a concrete "concept" (En
   clear, age-appropriate scope (e.g. counting 1-5, not 1-100) and teach it step by step with repetition: show
   it, say it, then recap it at the end.
 Make the promise VISIBLE in every scene, not only spoken: the visual_prompt names the exact objects and how many
-there are, and the action that demonstrates the step (counting = the character touches or picks up each object
-one by one as it is counted, then holds up that many fingers). Keep counted objects few (at most 5), large,
-identical and clearly separated so the video model can render them; never rely on on-screen numbers or text.
+there are. Show a count as a state of the scene, because video models render that reliably: exactly that many
+objects are on screen (counting 3 = exactly three apples on the table), and in a continuing shot the teacher or
+character adds just one more object. NEVER ask for a number of raised fingers, hand signs, or touching an object
+by its position ("the third from the left"): video models get these wrong and usually show an open waving hand.
+Keep counted objects few (at most 5), large, identical and clearly separated so the video model can render them;
+never rely on on-screen numbers or text.
 The narration says exactly what is shown at that moment (the same number, the same object).
 At most one intro scene and one closing/recap scene; every other scene delivers a beat.
 One clear main action per scene (4-5 seconds is too short for more), described with concrete body movement.
-
-"bible" (English):
 
 "bible" (English):
 - "character": the main character, 40-80 words — or, when the idea asks for several characters, a cast of 2-3,
@@ -50,20 +56,29 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   (Indonesian-language signs, local vehicles) — never like another country. Describe only the general look of the
   place; do NOT list story props or room-specific objects here (it is pasted into every shot, so a sink or a broom
   named here would appear in every room). Props belong in the visual_prompt of the scenes that need them.
-- "style": one line for the visual style and rendering (e.g. "stylized 3D animated feature film look, soft global
-  illumination, warm colour grading, shallow depth of field"). Never name studios, artists or franchises.
+- "style": one line that fixes the look of the whole video: the medium the user asked for (if they named none, choose
+  what suits the idea), the lens look, lighting approach, colour palette and grade, and surface texture (e.g. live
+  action: "documentary look on a 35mm lens, natural window light, muted warm grade, real skin texture, subtle film
+  grain"; animation: "stylized 3D animated feature look, soft global illumination, warm pastel grade, shallow depth
+  of field"). Never name studios, artists or franchises. No empty hype words ("masterpiece", "8K", "ultra realistic").
 
 "scenes": each scene has
-- "visual_prompt": English, ONLY what is specific to this shot: the exact spot inside the world, what the character
-  does, camera shot size and movement, time of day and lighting. Refer to the character as "the character" (or
+- "visual_prompt": English, 40-70 words, ONLY what is specific to this shot, written as a shot description in this
+  order: the exact spot inside the world; one physical action told from its first moment to its last (how the body
+  moves and how much, e.g. "leans forward, lifts the cup with both hands, sips, then smiles"), including small
+  natural behaviour such as a glance or a breath; shot size and lens feel; one camera behaviour with its speed
+  (locked-off, slow dolly, gentle handheld); the light and where it comes from. Vary shot sizes between sequences
+  (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
+  Refer to the character as "the character" (or
   the cast by their names); do NOT re-describe the character, the world or the style (the bible is added automatically). Keep the time of day
   and weather progressing logically from scene to scene. No on-screen text, captions, logos or watermarks.
 - "continues": true when this shot continues the previous one in the same place and moment (the app then starts
   this clip from the last frame of the previous clip), false when the location or time changes. Group the story
-  into short sequences of 2-3 continuous shots per location; the first scene is always false. A continuing shot
-  starts exactly where the previous one ended, so keep its shot size and camera position (change them only with
-  a slow, continuous camera move such as "the camera slowly pushes in"); a different framing such as wide →
-  close-up needs "continues": false.
+  into sequences of continuous shots per location; the first scene is always false. A continuing shot starts
+  exactly where the previous one ended, so keep its shot size, camera position and the characters' screen
+  positions. Steps of one lesson or song at the same spot all stay continuous with a fixed camera ("the camera
+  stays still"): no close-ups, no zooms or push-ins and no view from the other side, which flip the room and push
+  the objects out of frame.
 - "narration": voice-over spoken during the scene, in {language}. At most {words} words per scene
   ({wps} words per second of duration). May be empty for purely visual moments.
 - "duration": seconds, integer between {min_s} and {max_s}.
@@ -93,10 +108,19 @@ visual_prompt in English without re-describing the bible, narration in {language
 BIBLE_KEYS = ("character", "world", "style")
 
 
-def clip_prompt(options: dict, visual_prompt: str, sung: str = "") -> str:
+# Added to every clip: what separates a filmed shot from typical AI video.
+SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believable weight and timing in every "
+              "movement, smooth motivated camera work, steady light and exposure. Faces, hands and objects keep their "
+              "shape and number from the first to the last frame, with no morphing or flicker.")
+SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side, characters' "
+               "positions and objects.")
+
+
+def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False) -> str:
     """Final prompt for one clip: fixed bible + the shot (+ in song mode what is
-    sung during it). Projects planned before the bible existed have empty bible
-    fields and keep their prompt."""
+    sung during it, + for a seeded clip the order to continue its image).
+    Projects planned before the bible existed have empty bible fields and keep
+    their prompt."""
     style = (options.get("bible_style") or "").strip().rstrip(".")
     character = (options.get("bible_character") or "").strip().rstrip(".")
     world = (options.get("bible_world") or "").strip().rstrip(".")
@@ -111,8 +135,11 @@ def clip_prompt(options: dict, visual_prompt: str, sung: str = "") -> str:
     if world:
         parts.append(f"Setting: {world}.")
     parts.append(f"Shot: {shot}")
+    if seeded:
+        parts.append(SEEDED_SHOT)
     if sung:
         parts.append(sung)
+    parts.append(SHOT_CRAFT)
     parts.append("No on-screen text, captions or watermarks.")
     return " ".join(parts)
 
@@ -133,9 +160,8 @@ def sung_direction(options: dict, start: float, end: float) -> str:
     if not lines:
         return f"Music plays (instrumental); the character moves on the beat{tempo}." if tempo else ""
     timed = "; ".join(f'{t:.0f}s "{text}"' for t, text in lines)
-    return (f"A song is sung during this shot ({timed}): the character sings along and acts out each line with "
-            f"clear matching gestures exactly when it is sung (counting = holding up that many fingers), "
-            f"moving on the beat{tempo}.")
+    return (f"A song is sung during this shot ({timed}): the character sings along with simple, happy body movement "
+            f"on the beat{tempo}, without hand signs, finger counting or waving.")
 
 
 def has_bible(options: dict) -> bool:
@@ -351,19 +377,70 @@ def song_prompt(*, style: str, vocal: str, lyrics: str, total: int) -> str:
             f"its timestamp, instrumental intro/outro where marked, gentle fade-out ending.\n\nLyrics:\n{lyrics}")[:6000]
 
 
-def parse_lyrics(lyrics: str, total: float, max_line: float = 6.0) -> list[tuple[float, float, str]]:
-    """Timed lines from LRC text → cues ``(start, end, text)``; a cue lasts
-    until the next line (max ``max_line`` seconds). Section headers are skipped."""
+def _timed_lines(lyrics: str) -> list[tuple[float, str]]:
+    """Sorted ``(second, text)`` of LRC lines; a timestamp with no text marks
+    where the singing stops."""
     timed = []
     for raw in (lyrics or "").splitlines():
         match = _LRC_RE.match(raw.strip())
-        if match and match.group(3).strip():
+        if match:
             timed.append((int(match.group(1)) * 60 + float(match.group(2)), match.group(3).strip()))
-    timed.sort(key=lambda item: item[0])
+    return sorted(timed, key=lambda item: item[0])
+
+
+def _words(text: str) -> str:
+    return " ".join(re.findall(r"\w+", (text or "").lower()))
+
+
+SONG_FADE_SECONDS = 2.0  # music left to fade out after the last sung word
+
+
+def song_lengths(scenes: list[dict], lyrics: str, music_seconds: float | None = None) -> list[float] | None:
+    """Scene lengths that put each cut on the first line sung for that scene. The
+    video ends after the last sung word when an empty timed line marks it, else
+    with the song (``music_seconds``), else at the planned length.
+
+    A scene owns the lyric lines found in its narration. ``None`` when the lyrics
+    do not follow the scenes (keep the planned durations)."""
+    timed = _timed_lines(lyrics)
+    lines = [(t, _words(text)) for t, text in timed if text]
+    starts, pos = [], 0
+    for scene in sorted(scenes, key=lambda s: s["idx"]):
+        said = _words(scene.get("narration") or "")
+        if pos >= len(lines) or lines[pos][1] not in said:
+            return None
+        starts.append(lines[pos][0])
+        while pos < len(lines) and lines[pos][1] in said:
+            pos += 1
+    if not starts or pos != len(lines):
+        return None
+    if not timed[-1][1]:
+        end = timed[-1][0] + SONG_FADE_SECONDS
+        end = min(end, music_seconds) if music_seconds else end
+    else:
+        end = music_seconds or sum(float(s.get("duration") or 0) for s in scenes)
+    edges = [0.0, *starts[1:], end]
+    lengths = [round(b - a, 3) for a, b in zip(edges, edges[1:])]
+    return lengths if min(lengths) >= 1.0 else None
+
+
+def fit_lengths(durations: list[float], total: float) -> list[float]:
+    """Planned scene lengths scaled to fill ``total`` seconds (lyrics that do not
+    follow the scenes: the video still lasts exactly as long as the song)."""
+    planned = sum(durations) or 1.0
+    return [round(d * total / planned, 3) for d in durations]
+
+
+def parse_lyrics(lyrics: str, total: float, max_line: float = 6.0) -> list[tuple[float, float, str]]:
+    """Timed lines from LRC text → cues ``(start, end, text)``; a cue lasts
+    until the next line (max ``max_line`` seconds). Section headers are skipped."""
+    timed = _timed_lines(lyrics)
     cues = []
     for i, (start, text) in enumerate(timed):
         if start >= total:
             break
+        if not text:
+            continue
         nxt = timed[i + 1][0] if i + 1 < len(timed) else total
         cues.append((round(start, 3), round(min(nxt, start + max_line, total), 3), text))
     return cues

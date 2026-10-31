@@ -290,3 +290,55 @@ def test_planner_asks_for_a_visible_concept_and_keeps_it():
     planner.plan_storyboard(Chat(), "m", prompt="x", language="id-ID", clip_seconds=5,
                             target_seconds=10, limit_seconds=60, aspect="9:16")
     assert "music video with a sung song" not in sent[1]
+
+
+def _song_scenes():
+    return [{"idx": 0, "narration": "Satu apel! Ayo hitung satu!"}, {"idx": 1, "narration": "Dua apel!"}]
+
+
+def test_song_lengths_put_cuts_on_sung_lines_and_keep_the_last_word():
+    from app.pipeline import planner
+    lyrics = "[Verse]\n[0:00.4] Satu apel!\n[0:02.9] Ayo hitung satu!\n[0:05.2] Dua apel!\n[0:08.0]"
+    assert planner.song_lengths(_song_scenes(), lyrics, 40.0) == [5.2, 4.8]  # 8.0 + 2 s fade
+    assert planner.song_lengths(_song_scenes(), lyrics, 9.0) == [5.2, 3.8]   # never past the song
+    assert [c[1] for c in planner.parse_lyrics(lyrics, 10.0)] == [2.9, 5.2, 8.0]
+
+
+def test_song_lengths_keep_the_plan_when_lyrics_do_not_follow_the_scenes():
+    from app.pipeline import planner
+    assert planner.song_lengths(_song_scenes(), "[0:00] Lagu lain\n[0:03] Dua apel!") is None
+    assert planner.song_lengths(_song_scenes(), "") is None
+    assert planner.song_lengths(_song_scenes(), "[0:00] Satu apel!\n[0:00.5] Dua apel!") is None  # 0.5 s scene
+
+
+def test_broken_seam_gets_a_crossfade_instead_of_a_hard_cut():
+    from app.engine import scene_transitions
+    scenes = [{"continues": False}, {"continues": True}]
+    assert scene_transitions(scenes, [6, 6], {"transition": 0.5}) == [0.0, 0.0]
+    assert scene_transitions(scenes, [6, 6], {"transition": 0.5}, {0}) == [0.5, 0.0]
+
+
+def test_prompts_never_ask_for_finger_counts():
+    from app.pipeline import planner
+    sung = planner.sung_direction({"lyrics": "[0:00] Tiga apel"}, 0.0, 4.0)
+    assert "without hand signs" in sung and "holding up" not in sung
+    assert "holds up" not in planner._SYSTEM
+
+
+def test_clip_prompt_adds_production_direction_and_seed_order():
+    from app.pipeline import planner
+    options = {"bible_style": "35mm look"}
+    plain = planner.clip_prompt(options, "A cat jumps")
+    assert planner.SHOT_CRAFT in plain and planner.SEEDED_SHOT not in plain
+    assert planner.SEEDED_SHOT in planner.clip_prompt(options, "A cat jumps", seeded=True)
+    assert planner.clip_prompt({}, "A cat jumps") == "A cat jumps"  # projects without a bible keep their prompt
+
+
+def test_video_length_follows_the_song_when_lyrics_have_no_end_marker():
+    from app.pipeline import planner
+    scenes = [{"idx": 0, "narration": "Satu apel!", "duration": 5}, {"idx": 1, "narration": "Dua apel!", "duration": 5}]
+    lyrics = "[0:00] Satu apel!\n[0:05] Dua apel!"
+    assert planner.song_lengths(scenes, lyrics, 40.0) == [5.0, 35.0]
+    assert planner.song_lengths(scenes, lyrics) == [5.0, 5.0]
+    assert planner.fit_lengths([5.0, 5.0], 40.0) == [20.0, 20.0]
+

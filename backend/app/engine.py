@@ -60,17 +60,19 @@ def render_fps(clips: list[Path], default: int) -> float:
     return rate if 0 < rate <= default else float(default)
 
 
-def scene_transitions(scenes: list[dict], lengths: list[float], options: dict) -> list[float]:
+def scene_transitions(scenes: list[dict], lengths: list[float], options: dict,
+                      broken: frozenset | set = frozenset()) -> list[float]:
     """Crossfade seconds after each scene (last is 0). A shot that continues the
-    previous one already starts from its last frame, so it gets a hard cut;
-    fades are capped at a third of the shorter neighbouring scene."""
+    previous one already starts from its last frame, so it gets a hard cut,
+    unless the seam after scene ``i`` is in ``broken`` (the clip ignored its
+    seed); fades are capped at a third of the shorter neighbouring scene."""
     try:
         wanted = max(0.0, min(1.5, float(options.get("transition", 0.5) or 0)))
     except (TypeError, ValueError):
         wanted = 0.5
     fades = []
     for i in range(len(scenes)):
-        if i == len(scenes) - 1 or not wanted or scenes[i + 1].get("continues"):
+        if i == len(scenes) - 1 or not wanted or (scenes[i + 1].get("continues") and i not in broken):
             fades.append(0.0)
         else:
             fades.append(round(min(wanted, lengths[i] / 3, lengths[i + 1] / 3), 3))
@@ -287,6 +289,9 @@ class Engine:
                                                      and s["clip_file"] and ws.path(s["clip_file"]).exists())}
         if not todo_ids:
             return
+        if self._is_song(project) and not project["options"].get("lyrics"):
+            # Clips act out the sung lines: without lyrics they are billed for nothing.
+            raise JobFailed("mode lagu: buat lirik dulu di panel Musik sebelum generate clip")
         continuity = bool(project["options"].get("continuity"))
         # With a story bible the planner marks which shots continue the previous
         # one; only those start from its last frame (a new location must not
@@ -361,8 +366,9 @@ class Engine:
             try:
                 video = client.generate_video(
                     profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
-                                                                sung=self._sung_during(project, scene)),
-                    seconds=max(int(round(scene["duration"])), planner.min_clip_seconds(int(profile["clip_seconds"]))),
+                                                                sung=self._sung_during(project, scene, ws),
+                                                                seeded=seed is not None),
+                    seconds=self._clip_seconds(project, profile, scene, ws),
                     aspect_ratio=preset["model_aspect"], image_png=seed,
                     enable_audio=bool(project["options"].get("keep_clip_audio")),
                     should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
@@ -408,17 +414,57 @@ class Engine:
         except media.MediaError:
             return None
 
-    def _sung_during(self, project: dict, scene: dict) -> str:
+    def _broken_seams(self, project: dict, scenes: list[dict], ws) -> set[int]:
+        """Seams after scene ``i`` where the seeded next clip does not match."""
+        broken = set()
+        for i in range(len(scenes) - 1):
+            nxt = scenes[i + 1]
+            if nxt.get("continues") and nxt["idx"] == scenes[i]["idx"] + 1 and nxt.get("clip_file"):
+                try:
+                    if media.seam_broken(ws.path(scenes[i]["clip_file"]), ws.path(nxt["clip_file"])):
+                        broken.add(i)
+                except media.MediaError:
+                    pass
+        return broken
+
+    @staticmethod
+    def _music_path(project: dict, ws) -> Path | None:
+        opts = project["options"]
+        if opts.get("music_mode") != "none" and opts.get("music_file") and ws.path(opts["music_file"]).exists():
+            return ws.path(opts["music_file"])
+        return None
+
+    def _song_timeline(self, project: dict, scenes: list[dict], ws) -> list[float] | None:
+        """Song mode: scene lengths set by the song, so its whole length is used and
+        it never gets cut or looped. ``None`` while there is no way to tell."""
+        if not self._is_song(project):
+            return None
+        music = self._music_path(project, ws)
+        seconds = media.audible_end(music) if music else None
+        lengths = planner.song_lengths(scenes, project["options"].get("lyrics") or "", seconds)
+        if not lengths and seconds:
+            lengths = planner.fit_lengths([float(s["duration"]) for s in scenes], seconds)
+        return lengths
+
+    def _clip_seconds(self, project: dict, profile: dict, scene: dict, ws) -> int:
+        """Length to request: the part of the song this clip covers, when known."""
+        limit = int(profile["clip_seconds"])
+        ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
+        timeline = self._song_timeline(project, ordered, ws)
+        at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
+        wanted = min(timeline[at], limit) if timeline else scene["duration"]
+        return max(int(round(wanted)), planner.min_clip_seconds(limit))
+
+    def _sung_during(self, project: dict, scene: dict, ws) -> str:
         """Song mode: the lyric lines (and tempo) heard during this scene, so the
         clip acts out what is sung instead of a generic dance."""
         if not self._is_song(project):
             return ""
-        start = 0.0
-        for other in sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"]):
-            if other["idx"] == scene["idx"]:
-                break
-            start += float(other["duration"])
-        return planner.sung_direction(project["options"], start, start + float(scene["duration"]))
+        ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
+        lengths = self._song_timeline(project, ordered, ws) or [float(s["duration"]) for s in ordered]
+        at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
+        start = sum(lengths[:at])
+        return planner.sung_direction(project["options"], start, start + lengths[at])
 
     @staticmethod
     def _is_song(project: dict) -> bool:
@@ -489,7 +535,13 @@ class Engine:
         for scene in scenes:
             info = {} if song else (scene.get("narration_info") or {})
             lengths.append(round(max(float(scene["duration"]), float(info.get("duration") or 0) + NARRATION_TAIL), 2))
-        fades = scene_transitions(scenes, lengths, opts) if media.has_filter("xfade") else [0.0] * len(scenes)
+        music = self._music_path(project, ws)
+        # Song mode: the uploaded song sets the timeline, not the planned durations.
+        timeline = self._song_timeline(project, scenes, ws) if song and music else None
+        if timeline:
+            lengths = timeline
+        fades = ([0.0] * len(scenes) if not media.has_filter("xfade")
+                 else scene_transitions(scenes, lengths, opts, self._broken_seams(project, scenes, ws)))
         fps = render_fps([ws.path(s["clip_file"]) for s in scenes if s.get("clip_file")], settings.render_fps)
         p_start = max(0.3, self.repo.job(job["id"])["progress"])
         for n, scene in enumerate(scenes, 1):
@@ -500,8 +552,9 @@ class Engine:
             # Faded sides need half a fade of extra picture (fades are centred on the cut).
             clip_seconds = media.crossfade_clip_seconds(lengths, fades, n - 1)
             lead = fades[n - 2] / 2 if n > 1 else 0.0
-            keep_frames = self._seam(project, scenes, n - 1, ws)
-            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|"
+            retime = seconds if timeline else None
+            keep_frames = None if retime or fades[n - 1] else self._seam(project, scenes, n - 1, ws)
+            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|{retime}|"
                                f"{preset['width']}x{preset['height']}|"
                                f"{fps:g}|{keep_audio}".encode()).hexdigest()[:10]
             norm = ws.path("norm", f"scene_{scene['idx']}_{key}.mp4")
@@ -512,7 +565,7 @@ class Engine:
                 media.normalize_clip(ws.path(scene["clip_file"]), part, width=preset["width"],
                                      height=preset["height"], fps=fps, seconds=clip_seconds,
                                      keep_audio=keep_audio, preset=settings.ffmpeg_preset, lead=lead,
-                                     keep_frames=keep_frames)
+                                     keep_frames=keep_frames, retime=retime)
                 os.replace(part, norm)
             norm_clips.append(norm)
             narr_src = ws.path(scene["narration_file"]) if scene.get("narration_file") and not song else None
@@ -540,9 +593,6 @@ class Engine:
                                                   encoding="utf-8")
             ass_name = f"{out_name}.ass"
 
-        music = None
-        if opts.get("music_mode") != "none" and opts.get("music_file") and ws.path(opts["music_file"]).exists():
-            music = ws.path(opts["music_file"])
         self._progress(job, 0.95, "Mixing audio & subtitle…")
         tmp_final = ws.path(tmp_dir, f"{out_name}.mp4")
         volume = 1.0 if song else float(opts.get("music_volume") or 0.25)  # a song is the main audio
