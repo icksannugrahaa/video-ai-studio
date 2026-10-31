@@ -112,8 +112,9 @@ BIBLE_KEYS = ("character", "world", "style")
 SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believable weight and timing in every "
               "movement, smooth motivated camera work, steady light and exposure. Faces, hands and objects keep their "
               "shape and number from the first to the last frame, with no morphing or flicker.")
-SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side, characters' "
-               "positions and objects.")
+SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
+               "positions. Every object in the image stays in place from the first frame, in the same number; "
+               "nothing disappears or resets.")
 
 
 def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False) -> str:
@@ -388,45 +389,39 @@ def _timed_lines(lyrics: str) -> list[tuple[float, str]]:
     return sorted(timed, key=lambda item: item[0])
 
 
-def _words(text: str) -> str:
-    return " ".join(re.findall(r"\w+", (text or "").lower()))
-
-
 SONG_FADE_SECONDS = 2.0  # music left to fade out after the last sung word
 
 
 def song_lengths(scenes: list[dict], lyrics: str, music_seconds: float | None = None) -> list[float] | None:
-    """Scene lengths that put each cut on the first line sung for that scene. The
-    video ends after the last sung word when an empty timed line marks it, else
-    with the song (``music_seconds``), else at the planned length.
-
-    A scene owns the lyric lines found in its narration. ``None`` when the lyrics
-    do not follow the scenes (keep the planned durations)."""
+    """Scene lengths that put each cut on the sung line nearest its planned start,
+    the same timestamps the subtitles use. A scene with no line near it keeps its
+    planned start. The video ends after the last sung word when an empty timed
+    line marks it, else with the song (``music_seconds``), else as planned.
+    ``None`` without timed lyrics or when the song is too short for the scenes."""
     timed = _timed_lines(lyrics)
-    lines = [(t, _words(text)) for t, text in timed if text]
-    starts, pos = [], 0
-    for scene in sorted(scenes, key=lambda s: s["idx"]):
-        said = _words(scene.get("narration") or "")
-        if pos >= len(lines) or lines[pos][1] not in said:
-            return None
-        starts.append(lines[pos][0])
-        while pos < len(lines) and lines[pos][1] in said:
-            pos += 1
-    if not starts or pos != len(lines):
+    lines = [t for t, text in timed if text]
+    ordered = sorted(scenes, key=lambda s: s["idx"])
+    if not lines or not ordered:
         return None
+    planned = [float(s.get("duration") or 0) for s in ordered]
+    edges, at = [0.0], 0.0
+    for before, length in zip(planned, planned[1:]):
+        at += before
+        near = [t for t in lines if abs(t - at) <= min(before, length) / 2 and t > edges[-1]]
+        edges.append(min(near, key=lambda t: abs(t - at)) if near else at)
     if not timed[-1][1]:
         end = timed[-1][0] + SONG_FADE_SECONDS
         end = min(end, music_seconds) if music_seconds else end
     else:
-        end = music_seconds or sum(float(s.get("duration") or 0) for s in scenes)
-    edges = [0.0, *starts[1:], end]
+        end = music_seconds or sum(planned)
+    edges.append(end)
     lengths = [round(b - a, 3) for a, b in zip(edges, edges[1:])]
     return lengths if min(lengths) >= 1.0 else None
 
 
 def fit_lengths(durations: list[float], total: float) -> list[float]:
-    """Planned scene lengths scaled to fill ``total`` seconds (lyrics that do not
-    follow the scenes: the video still lasts exactly as long as the song)."""
+    """Planned scene lengths scaled to fill ``total`` seconds (no timed lyrics to
+    follow: the video still lasts exactly as long as the song)."""
     planned = sum(durations) or 1.0
     return [round(d * total / planned, 3) for d in durations]
 

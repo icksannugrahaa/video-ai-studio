@@ -30,7 +30,8 @@ def _run_jobs(app):
 
 
 @needs_ffmpeg
-def test_plan_render_edit_regenerate(app, client, fake_client, settings):
+def test_plan_render_edit_regenerate(app, client, fake_client, settings, monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)  # fake clips never connect
     project = _setup(client, continuity=True)
     pid = project["id"]
     client.post(f"/api/projects/{pid}/plan")
@@ -287,6 +288,7 @@ def test_crossfade_keeps_scene_timeline(tmp_path):
 
 @needs_ffmpeg
 def test_bible_prompts_and_smart_continuity(app, client, fake_client, settings, monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)  # fake clips never connect
     monkeypatch.setattr(fake_client, "storyboard", {
         "title": "Oren", "music_prompt": "",
         "bible": {"character": "A slim orange tabby cat with a navy scarf", "world": "Jakarta, Indonesia",
@@ -369,6 +371,77 @@ def test_parallel_chains_seed_only_continuous_shots(settings, fake_client, monke
     seeded = {c[1].split("Shot: ")[1][:6]: c[4] for c in fake_client.calls if c[0] == "video"}
     assert seeded == {"shot 0": False, "shot 1": True, "shot 2": False, "shot 3": False}
     assert all(s["clip_status"] == "done" for s in detail["scenes"])
+
+
+def _rendered(client, app, pid):
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "succeeded", detail["jobs"][0]["message"]
+    return detail
+
+
+def _planned_chain(app, client, fake_client, monkeypatch, *flags):
+    monkeypatch.setattr(fake_client, "storyboard", _bible_board(*flags))
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    return pid
+
+
+def _videos(fake_client):
+    return [c for c in fake_client.calls if c[0] == "video"]
+
+
+@needs_ffmpeg
+def test_clip_that_left_its_seed_is_retaken_once_and_the_closer_one_stays(app, client, fake_client, monkeypatch, settings):
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 5.0 if "_retake" in str(nxt) else 30.0)
+    fake_client.calls = []
+    scenes = _rendered(client, app, pid)["scenes"]
+    assert len(_videos(fake_client)) == 3
+    assert scenes[1]["clip_file"].endswith("_retake.mp4")
+    clips = settings.projects_dir / str(pid) / "clips"
+    assert not (clips / "scene_1_v1.mp4").exists()
+
+
+@needs_ffmpeg
+def test_worse_retake_is_dropped_and_clip_is_not_retried_again(app, client, fake_client, monkeypatch, settings):
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 40.0 if "_retake" in str(nxt) else 30.0)
+    fake_client.calls = []
+    scenes = _rendered(client, app, pid)["scenes"]
+    assert len(_videos(fake_client)) == 3
+    assert scenes[1]["clip_file"] == "clips/scene_1_v1.mp4"
+    assert not (settings.projects_dir / str(pid) / "clips" / "scene_1_v1_retake.mp4").exists()
+
+
+@needs_ffmpeg
+def test_failed_retake_keeps_the_first_clip(app, client, fake_client, monkeypatch):
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
+
+    def gap(prev, nxt):
+        fake_client.fail_prompts = ("shot 1",)
+        return 30.0
+
+    monkeypatch.setattr(media, "seam_gap", gap)
+    scenes = _rendered(client, app, pid)["scenes"]
+    assert scenes[1]["clip_status"] == "done" and scenes[1]["clip_file"] == "clips/scene_1_v1.mp4"
+
+
+@needs_ffmpeg
+def test_remaking_a_clip_also_remakes_the_next_one_only_if_it_no_longer_connects(app, client, fake_client, monkeypatch):
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True, True, True, False)
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 1.0)
+    scenes = _rendered(client, app, pid)["scenes"]
+    # the user regenerates clip idx 1: idx 2 was seeded by the old one and breaks, idx 3 still connects
+    app.state.services.repo.update_scene(scenes[1]["id"], version=2)
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 30.0 if "scene_2_v1" in str(nxt) else 1.0)
+    fake_client.calls = []
+    scenes = _rendered(client, app, pid)["scenes"]
+    assert [c[1].split("Shot: ")[1][:6] for c in _videos(fake_client)] == ["shot 1", "shot 2"]
+    assert [s["version"] for s in scenes] == [1, 2, 2, 1, 1]
+    assert scenes[2]["clip_file"] == "clips/scene_2_v2.mp4"
 
 
 @needs_ffmpeg

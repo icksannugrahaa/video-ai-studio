@@ -139,15 +139,26 @@ def seam_frames(prev: Path, nxt: Path, *, window: float = 0.6, fps: float = 24.0
     return k + 1
 
 
-SEAM_BREAK = 15.0  # mean grey difference (0-255): clearly another picture, seen 33 vs 6 for a good seam
+SEAM_BREAK = 15.0  # worst block's mean grey difference (0-255); good seeded seams measure 10-11, broken ones 20+
+
+
+def seam_gap(prev: Path, nxt: Path) -> float:
+    """How far a seeded clip's first frame is from the end of the previous clip.
+    Compared per block: a small object changing barely moves the whole-frame mean."""
+    frames, first = _grey_frames(prev), _grey_frames(nxt, first_only=True)
+    if not frames or not first:
+        return 0.0
+    w, h = _SEAM_SIZE
+    cols, rows = 8, 4
+    totals = [0] * (cols * rows)
+    for i, (x, y) in enumerate(zip(frames[-1], first[0])):
+        totals[(i % w) * cols // w + (i // w) * rows // h * cols] += abs(x - y)
+    return max(totals) / (w * h / (cols * rows))
 
 
 def seam_broken(prev: Path, nxt: Path) -> bool:
-    """Whether a seeded clip visibly ignored its seed (a hard cut would jump)."""
-    frames, first = _grey_frames(prev), _grey_frames(nxt, first_only=True)
-    if not frames or not first:
-        return False
-    return sum(abs(x - y) for x, y in zip(frames[-1], first[0])) / len(first[0]) > SEAM_BREAK
+    """Whether a seeded clip visibly left its seed (an apple gone, an arm moved)."""
+    return seam_gap(prev, nxt) > SEAM_BREAK
 
 
 def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float, seconds: float,
@@ -174,11 +185,11 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
         if 1.0 < factor <= 1.15:  # ≤ 15 % slower is not noticeable; more would be
             stretch = f"trim=end_frame={keep_frames},setpts=(PTS-STARTPTS)*{factor:.5f},"
     bounce = ""
-    if retime and src_seconds and 0.9 <= retime / src_seconds <= 1.6:
+    if retime and src_seconds and 0.9 <= retime / src_seconds <= 1.8:
         stretch = f"setpts=(PTS-STARTPTS)*{retime / src_seconds:.5f},"
         src_seconds = retime
-    elif retime and src_seconds and retime / src_seconds > 1.6:
-        factor = min(1.6, max(1.0, retime / (2 * src_seconds)))
+    elif retime and src_seconds and retime / src_seconds > 1.8:
+        factor = min(1.8, max(1.0, retime / (2 * src_seconds)))
         # After scaling: reverse buffers every frame, keep that small on a phone.
         bounce = (f"split[fwd][back];[back]reverse[rev];[fwd][rev]concat=n=2:v=1:a=0,"
                   f"setpts=(PTS-STARTPTS)*{factor:.5f},fps={fps:g},")

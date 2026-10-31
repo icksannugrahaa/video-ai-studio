@@ -206,9 +206,9 @@ def test_clip_prompt_prepends_bible_verbatim():
 def test_scene_transitions_cut_continuous_shots_and_cap_fades():
     from app.engine import scene_transitions
     scenes = [{"continues": False}, {"continues": False}, {"continues": True}, {"continues": False}]
-    assert scene_transitions(scenes, [6, 6, 6, 1.2], {"transition": 0.5}) == [0.5, 0.0, 0.4, 0.0]
+    assert scene_transitions(scenes, [6, 6, 6, 1.2], {"transition": 0.5}) == [0.5, 0.2, 0.4, 0.0]
     assert scene_transitions(scenes, [6, 6, 6, 6], {"transition": 0}) == [0.0, 0.0, 0.0, 0.0]
-    assert scene_transitions(scenes, [6, 6, 6, 6], {}) == [0.5, 0.0, 0.5, 0.0]  # default 0.5 s
+    assert scene_transitions(scenes, [6, 6, 6, 6], {}) == [0.5, 0.2, 0.5, 0.0]  # default 0.5 s
     assert scene_transitions(scenes[:1], [6], {"transition": 1}) == [0.0]
 
 
@@ -293,7 +293,7 @@ def test_planner_asks_for_a_visible_concept_and_keeps_it():
 
 
 def _song_scenes():
-    return [{"idx": 0, "narration": "Satu apel! Ayo hitung satu!"}, {"idx": 1, "narration": "Dua apel!"}]
+    return [{"idx": 0, "narration": "Satu", "duration": 5}, {"idx": 1, "narration": "Dua", "duration": 5}]
 
 
 def test_song_lengths_put_cuts_on_sung_lines_and_keep_the_last_word():
@@ -304,18 +304,21 @@ def test_song_lengths_put_cuts_on_sung_lines_and_keep_the_last_word():
     assert [c[1] for c in planner.parse_lyrics(lyrics, 10.0)] == [2.9, 5.2, 8.0]
 
 
-def test_song_lengths_keep_the_plan_when_lyrics_do_not_follow_the_scenes():
+def test_song_lengths_follow_timestamps_even_when_lyric_words_differ_from_narration():
     from app.pipeline import planner
-    assert planner.song_lengths(_song_scenes(), "[0:00] Lagu lain\n[0:03] Dua apel!") is None
+    lyrics = "[0:00] Kata lain sama sekali\n[0:05] Baris kedua"
+    assert planner.song_lengths(_song_scenes(), lyrics, 33.5) == [5.0, 28.5]
+    assert planner.song_lengths(_song_scenes(), "[0:00] Satu\n[0:30] Jauh sekali", 12.0) == [5.0, 7.0]  # no line near
     assert planner.song_lengths(_song_scenes(), "") is None
-    assert planner.song_lengths(_song_scenes(), "[0:00] Satu apel!\n[0:00.5] Dua apel!") is None  # 0.5 s scene
+    assert planner.song_lengths(_song_scenes(), "[0:00] Satu", 5.5) is None  # song too short for the scenes
 
 
-def test_broken_seam_gets_a_crossfade_instead_of_a_hard_cut():
+def test_broken_seam_gets_a_full_crossfade_and_good_seam_a_short_dissolve():
     from app.engine import scene_transitions
     scenes = [{"continues": False}, {"continues": True}]
-    assert scene_transitions(scenes, [6, 6], {"transition": 0.5}) == [0.0, 0.0]
+    assert scene_transitions(scenes, [6, 6], {"transition": 0.5}) == [0.2, 0.0]
     assert scene_transitions(scenes, [6, 6], {"transition": 0.5}, {0}) == [0.5, 0.0]
+    assert scene_transitions(scenes, [6, 6], {"transition": 0}, {0}) == [0.0, 0.0]
 
 
 def test_prompts_never_ask_for_finger_counts():

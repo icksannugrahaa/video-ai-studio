@@ -31,6 +31,7 @@ CLIP_ATTEMPTS = 3
 # instant retries just fail the same way (seen live: CodeBuddy 429 bursts).
 CLIP_RETRY_DELAYS = (30, 90)
 NARRATION_TAIL = 0.4  # seconds of breathing room after the last sentence
+SEAM_DISSOLVE = 0.2  # seconds, continuing shots
 
 
 def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[list[dict]]:
@@ -63,19 +64,21 @@ def render_fps(clips: list[Path], default: int) -> float:
 def scene_transitions(scenes: list[dict], lengths: list[float], options: dict,
                       broken: frozenset | set = frozenset()) -> list[float]:
     """Crossfade seconds after each scene (last is 0). A shot that continues the
-    previous one already starts from its last frame, so it gets a hard cut,
-    unless the seam after scene ``i`` is in ``broken`` (the clip ignored its
-    seed); fades are capped at a third of the shorter neighbouring scene."""
+    previous one starts from its last frame, but models re-render that frame, so
+    it gets just a short dissolve to hide the twitch; a full fade when the seam
+    after scene ``i`` is in ``broken`` (the clip left its seed). Fades are capped
+    at a third of the shorter neighbouring scene."""
     try:
         wanted = max(0.0, min(1.5, float(options.get("transition", 0.5) or 0)))
     except (TypeError, ValueError):
         wanted = 0.5
     fades = []
     for i in range(len(scenes)):
-        if i == len(scenes) - 1 or not wanted or (scenes[i + 1].get("continues") and i not in broken):
+        if i == len(scenes) - 1 or not wanted:
             fades.append(0.0)
-        else:
-            fades.append(round(min(wanted, lengths[i] / 3, lengths[i + 1] / 3), 3))
+            continue
+        fade = min(wanted, SEAM_DISSOLVE) if scenes[i + 1].get("continues") and i not in broken else wanted
+        fades.append(round(min(fade, lengths[i] / 3, lengths[i + 1] / 3), 3))
     return fades
 
 
@@ -322,23 +325,33 @@ class Engine:
         chains = clip_chains(scenes, continuity=continuity, bible=bible)
         # Chains are independent and run side by side; scenes inside a chain wait
         # for the previous clip (its last frame seeds the next one).
-        work_chains = [[s for s in chain if s["id"] in todo_ids] for chain in chains]
-        work_chains = [c for c in work_chains if c]
-        total = len(todo_ids)
-        state = {"done": 0, "running": 0}
+        work_chains = [c for c in chains if any(s["id"] in todo_ids for s in c)]
+        state = {"done": 0, "running": 0, "total": len(todo_ids)}
         lock = threading.Lock()
         stop = threading.Event()  # first failure: no chain starts a new (billed) clip
 
         def report(note: str) -> None:
             with lock:
-                n, running = state["done"], state["running"]
+                n, running, total = state["done"], state["running"], state["total"]
             extra = f" · {running} berjalan paralel" if running > 1 else ""
             self._progress(job, p0 + (p1 - p0) * n / total, f"{note}{extra}")
 
         def run_chain(chain: list[dict]) -> None:
+            remade = False  # the previous clip of this chain changed in this job
             for scene in chain:
                 if stop.is_set():
                     return
+                if scene["id"] not in todo_ids:
+                    if not remade or not self._seed_went_stale(project, scene, ws):
+                        remade = False
+                        continue
+                    # Its seed was replaced and it no longer connects. Bumping the
+                    # version first lets a resumed job finish the remake.
+                    scene = {**scene, "version": scene["version"] + 1}
+                    self.repo.update_scene(scene["id"], version=scene["version"])
+                    with lock:
+                        state["total"] += 1
+                remade = True
                 seed = None
                 if continuity and scene["idx"] > 0 and (scene.get("continues") or not bible):
                     prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
@@ -350,6 +363,8 @@ class Engine:
                     state["running"] += 1
                 try:
                     self._generate_one(job, project, profile, client, preset, scene, ws, seed)
+                    if seed is not None:
+                        self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
                 except BaseException:
                     stop.set()
                     raise
@@ -358,14 +373,14 @@ class Engine:
                         state["running"] -= 1
                 with lock:
                     state["done"] += 1
-                    n = state["done"]
+                    n, total = state["done"], state["total"]
                 report(f"Clip {n}/{total} selesai")
 
         # One clip at a time unless the project opts in: the phone server cannot
         # take several video jobs at once. SAV_CLIP_CONCURRENCY caps the opt-in.
         limit = self.settings.clip_concurrency if project["options"].get("parallel_clips") else 1
         lanes = max(1, min(limit, len(work_chains)))
-        report(f"Generate {total} clip" + (f" ({lanes} jalur paralel)" if lanes > 1 else "") + "…")
+        report(f"Generate {len(todo_ids)} clip" + (f" ({lanes} jalur paralel)" if lanes > 1 else "") + "…")
         if lanes == 1:
             for chain in work_chains:
                 run_chain(chain)
@@ -386,15 +401,7 @@ class Engine:
         started = time.monotonic()  # generation time shown per clip (includes retries/back-off)
         for attempt in range(1, CLIP_ATTEMPTS + 1):
             try:
-                video = client.generate_video(
-                    profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
-                                                                sung=self._sung_during(project, scene, ws),
-                                                                seeded=seed is not None),
-                    seconds=self._clip_seconds(project, profile, scene, ws),
-                    aspect_ratio=preset["model_aspect"], image_png=seed,
-                    enable_audio=bool(project["options"].get("keep_clip_audio")),
-                    should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
-                )
+                video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
                 name = f"clips/scene_{scene['idx']}_v{scene['version']}.{video.ext}"
                 ws.path(name).write_bytes(video.data)
                 media.duration(ws.path(name))  # validate it is a real video
@@ -419,6 +426,56 @@ class Engine:
                 self._sleep(job, delay)
         self.repo.update_scene(scene["id"], clip_status="failed", clip_error=(last_error or "gagal")[:300])
         raise JobFailed(f"Scene {scene['idx'] + 1} gagal: {last_error}")
+
+    def _request_clip(self, job, project, profile, client, preset, scene, ws, seed):
+        return client.generate_video(
+            profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
+                                                        sung=self._sung_during(project, scene, ws),
+                                                        seeded=seed is not None),
+            seconds=self._clip_seconds(project, profile, scene, ws),
+            aspect_ratio=preset["model_aspect"], image_png=seed,
+            enable_audio=bool(project["options"].get("keep_clip_audio")),
+            should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
+        )
+
+    def _previous_clip(self, project: dict, scene: dict, ws) -> Path | None:
+        prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
+        return ws.path(prev["clip_file"]) if prev and prev.get("clip_file") else None
+
+    def _seed_went_stale(self, project: dict, scene: dict, ws) -> bool:
+        prev = self._previous_clip(project, scene, ws)
+        try:
+            return bool(prev) and media.seam_gap(prev, ws.path(scene["clip_file"])) > media.SEAM_BREAK
+        except media.MediaError:
+            return False
+
+    def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed) -> None:
+        """A clip that left its seed gets one more (billed) try; the closer of the
+        two stays. The first clip is already saved, so a failed retake costs nothing."""
+        prev = self._previous_clip(project, scene, ws)
+        first = next(s for s in self.repo.scenes(project["id"]) if s["id"] == scene["id"])
+        try:
+            gap = media.seam_gap(prev, ws.path(first["clip_file"]))
+            if gap <= media.SEAM_BREAK:
+                return
+            self._progress(job, self.repo.job(job["id"])["progress"],
+                           f"Scene {scene['idx'] + 1} tidak menyambung, generate ulang sekali…")
+            video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
+            name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
+            ws.path(name).write_bytes(video.data)
+            closer = media.seam_gap(prev, ws.path(name)) < gap
+        except ProviderError as exc:
+            if exc.status == 499:
+                raise JobCanceled() from exc
+            log.warning("scene %s retake failed", scene["idx"])
+            return
+        except media.MediaError:
+            log.warning("scene %s retake unreadable", scene["idx"])
+            return
+        loser = first["clip_file"] if closer else name
+        if closer:
+            self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)
+        ws.path(loser).unlink(missing_ok=True)
 
     def _seam(self, project: dict, scenes: list[dict], i: int, ws) -> int | None:
         """Frames of clip ``i`` to keep so it ends where the next, seeded clip
