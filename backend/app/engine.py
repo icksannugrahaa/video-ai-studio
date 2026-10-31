@@ -431,12 +431,17 @@ class Engine:
         return client.generate_video(
             profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
                                                         sung=self._sung_during(project, scene, ws),
-                                                        seeded=seed is not None),
+                                                        seeded=seed is not None,
+                                                        previous=self._previous_shot(project, scene)),
             seconds=self._clip_seconds(project, profile, scene, ws),
             aspect_ratio=preset["model_aspect"], image_png=seed,
             enable_audio=bool(project["options"].get("keep_clip_audio")),
             should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
         )
+
+    def _previous_shot(self, project: dict, scene: dict) -> str:
+        prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
+        return prev["visual_prompt"] if prev else ""
 
     def _previous_clip(self, project: dict, scene: dict, ws) -> Path | None:
         prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
@@ -460,6 +465,7 @@ class Engine:
                 return
             self._progress(job, self.repo.job(job["id"])["progress"],
                            f"Scene {scene['idx'] + 1} tidak menyambung, generate ulang sekali…")
+            self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
             video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
             name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
             ws.path(name).write_bytes(video.data)
@@ -472,6 +478,8 @@ class Engine:
         except media.MediaError:
             log.warning("scene %s retake unreadable", scene["idx"])
             return
+        finally:
+            self.repo.update_scene(scene["id"], clip_status="done")
         loser = first["clip_file"] if closer else name
         if closer:
             self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)

@@ -337,6 +337,31 @@ def test_clip_prompt_adds_production_direction_and_seed_order():
     assert planner.clip_prompt({}, "A cat jumps") == "A cat jumps"  # projects without a bible keep their prompt
 
 
+def test_continuing_shot_starts_in_the_state_the_previous_shot_ends_in():
+    from app.pipeline import planner
+    first = "Medium shot. START: two apples. ACTION: adds one. END: exactly three apples, no others."
+    scenes = [{"visual_prompt": first, "continues": False},
+              {"visual_prompt": "Medium shot. START: two apples. ACTION: adds one. END: four apples.", "continues": True},
+              {"visual_prompt": "Wide. START: a bowl. ACTION: waves. END: a bowl.", "continues": False}]
+    planner.link_shots(scenes)
+    assert scenes[0]["visual_prompt"] == first
+    assert scenes[1]["visual_prompt"] == ("Medium shot. START: exactly three apples, no others. ACTION: adds one. "
+                                          "END: four apples.")
+    assert "START: a bowl." in scenes[2]["visual_prompt"]  # a new location does not inherit anything
+
+
+def test_seeded_clip_is_told_what_the_previous_shot_showed_unless_it_has_a_start():
+    from app.pipeline import planner
+    options = {"bible_style": "35mm look"}
+    prompt = planner.clip_prompt(options, "She adds an apple", seeded=True, previous="Three apples sit on the table")
+    assert "previous shot, which showed: Three apples sit on the table" in prompt
+    ended = planner.clip_prompt(options, "She adds an apple", seeded=True, previous="START: a. ACTION: b. END: three apples")
+    assert "which showed: three apples" in ended and "ACTION: b" not in ended
+    spelled = planner.clip_prompt(options, "START: three. ACTION: adds. END: four.", seeded=True, previous="x")
+    assert "previous shot" not in spelled
+    assert "previous shot" not in planner.clip_prompt(options, "She adds an apple", previous="x")  # not seeded
+
+
 def test_video_length_follows_the_song_when_lyrics_have_no_end_marker():
     from app.pipeline import planner
     scenes = [{"idx": 0, "narration": "Satu apel!", "duration": 5}, {"idx": 1, "narration": "Dua apel!", "duration": 5}]

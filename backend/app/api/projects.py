@@ -17,7 +17,7 @@ from app.providers import ProviderError
 router = APIRouter()
 MUSIC_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 MUSIC_MAX_BYTES = 30 * 1024 * 1024
-_FILE_RE = re.compile(r"^((final|preview)\.(mp4|srt)|clips/scene_\d+_v\d+\.mp4|music\.(mp3|wav|m4a|aac|ogg|flac))$")
+_FILE_RE = re.compile(r"^((final|preview)\.(mp4|srt)|clips/scene_\d+_v\d+(_retake)?\.mp4|music\.(mp3|wav|m4a|aac|ogg|flac))$")
 _MEDIA_TYPES = {".srt": "text/plain; charset=utf-8", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
                 ".aac": "audio/aac", ".ogg": "audio/ogg", ".flac": "audio/flac"}
 

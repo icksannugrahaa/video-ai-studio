@@ -396,10 +396,18 @@ def _videos(fake_client):
 @needs_ffmpeg
 def test_clip_that_left_its_seed_is_retaken_once_and_the_closer_one_stays(app, client, fake_client, monkeypatch, settings):
     pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
-    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 5.0 if "_retake" in str(nxt) else 30.0)
+    states = []
+
+    def gap(prev, nxt):
+        states.append(app.state.services.repo.scenes(pid)[1]["clip_status"])
+        return 5.0 if "_retake" in str(nxt) else 30.0
+
+    monkeypatch.setattr(media, "seam_gap", gap)
     fake_client.calls = []
     scenes = _rendered(client, app, pid)["scenes"]
     assert len(_videos(fake_client)) == 3
+    assert states[:2] == ["done", "running"] and scenes[1]["clip_status"] == "done"
+    assert client.get(f"/api/projects/{pid}/files/{scenes[1]['clip_file']}").status_code == 200  # the player can load it
     assert scenes[1]["clip_file"].endswith("_retake.mp4")
     clips = settings.projects_dir / str(pid) / "clips"
     assert not (clips / "scene_1_v1.mp4").exists()

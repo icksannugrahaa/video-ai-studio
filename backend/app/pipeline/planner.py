@@ -63,11 +63,17 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   of field"). Never name studios, artists or franchises. No empty hype words ("masterpiece", "8K", "ultra realistic").
 
 "scenes": each scene has
-- "visual_prompt": English, 40-70 words, ONLY what is specific to this shot, written as a shot description in this
-  order: the exact spot inside the world; one physical action told from its first moment to its last (how the body
-  moves and how much, e.g. "leans forward, lifts the cup with both hands, sips, then smiles"), including small
-  natural behaviour such as a glance or a breath; shot size and lens feel; one camera behaviour with its speed
-  (locked-off, slow dolly, gentle handheld); the light and where it comes from. Vary shot sizes between sequences
+- "visual_prompt": English, 60-100 words, ONLY what is specific to this shot, in exactly this form, because each clip
+  is generated without seeing the others and must be told everything it needs:
+  "<exact spot inside the world; shot size and lens feel; one camera behaviour with its speed (locked-off, slow
+  dolly, gentle handheld); the light and where it comes from>. START: <the first frame: where each person is, what
+  their hands hold, and every story object with its exact count and position>. ACTION: <one physical action told
+  from its first moment to its last (how the body moves and how much, e.g. "leans forward, lifts the cup with both
+  hands, sips, then smiles"), including small natural behaviour such as a glance or a breath, and what stays
+  untouched>. END: <the last frame, in the same terms as START>."
+  Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
+  exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
+  equal the count in START plus what ACTION adds. Vary shot sizes between sequences
   (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
   Refer to the character as "the character" (or
   the cast by their names); do NOT re-describe the character, the world or the style (the bible is added automatically). Keep the time of day
@@ -75,7 +81,7 @@ One clear main action per scene (4-5 seconds is too short for more), described w
 - "continues": true when this shot continues the previous one in the same place and moment (the app then starts
   this clip from the last frame of the previous clip), false when the location or time changes. Group the story
   into sequences of continuous shots per location; the first scene is always false. A continuing shot starts
-  exactly where the previous one ended, so keep its shot size, camera position and the characters' screen
+  exactly where the previous one ended: its START repeats the previous END word for word, so keep its shot size, camera position and the characters' screen
   positions. Steps of one lesson or song at the same spot all stay continuous with a fixed camera ("the camera
   stays still"): no close-ups, no zooms or push-ins and no view from the other side, which flip the room and push
   the objects out of frame.
@@ -111,15 +117,30 @@ BIBLE_KEYS = ("character", "world", "style")
 # Added to every clip: what separates a filmed shot from typical AI video.
 SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believable weight and timing in every "
               "movement, smooth motivated camera work, steady light and exposure. Faces, hands and objects keep their "
-              "shape and number from the first to the last frame, with no morphing or flicker.")
+              "shape from the first to the last frame, with no morphing or flicker, and the number of objects changes "
+              "only by what the action itself adds or removes.")
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
-               "positions. Every object in the image stays in place from the first frame, in the same number; "
+               "positions. Every object in the image is there from the first frame and stays in place; "
                "nothing disappears or resets.")
 
 
-def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False) -> str:
+_SHOT_RE = re.compile(r"\bSTART:\s*.*?\s*(?=\bACTION:)", re.S)
+_END_RE = re.compile(r"\bEND:\s*(.*)$", re.S)
+
+
+def link_shots(scenes: list[dict]) -> None:
+    """Make every continuing shot start in the exact state the previous one ends
+    in, so a lapse of the planner cannot lose an object between two clips."""
+    for prev, scene in zip(scenes, scenes[1:]):
+        end = _END_RE.search(prev["visual_prompt"])
+        if scene.get("continues") and end and _SHOT_RE.search(scene["visual_prompt"]):
+            scene["visual_prompt"] = _SHOT_RE.sub(lambda _: f"START: {end.group(1).strip()} ", scene["visual_prompt"], count=1)
+
+
+def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False, previous: str = "") -> str:
     """Final prompt for one clip: fixed bible + the shot (+ in song mode what is
-    sung during it, + for a seeded clip the order to continue its image).
+    sung during it, + for a seeded clip the order to continue its image and,
+    when the shot does not spell out its START, what the previous shot showed).
     Projects planned before the bible existed have empty bible fields and keep
     their prompt."""
     style = (options.get("bible_style") or "").strip().rstrip(".")
@@ -137,6 +158,9 @@ def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool 
         parts.append(f"Setting: {world}.")
     parts.append(f"Shot: {shot}")
     if seeded:
+        if previous and "START:" not in shot:
+            end = _END_RE.search(previous)
+            parts.append(f"It continues directly from the previous shot, which showed: {(end.group(1) if end else previous).strip()}")
         parts.append(SEEDED_SHOT)
     if sung:
         parts.append(sung)
@@ -221,6 +245,7 @@ def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
         total += seconds
     if not scenes:
         raise PlanError("storyboard kosong")
+    link_shots(scenes)
     raw_bible = data.get("bible") if isinstance(data.get("bible"), dict) else {}
     bible = {key: str(raw_bible.get(key) or "").strip()[:1200] for key in BIBLE_KEYS}
     raw_concept = data.get("concept") if isinstance(data.get("concept"), dict) else {}
