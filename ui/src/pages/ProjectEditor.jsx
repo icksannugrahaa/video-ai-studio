@@ -29,6 +29,8 @@ function Stepper({ steps }) {
   );
 }
 
+const songMode = (o) => o.music_mode === 'external' && o.music_style === 'song';
+
 function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPreview, previewBusy }) {
   const t = useT();
   const total = project.scenes.length;
@@ -43,6 +45,25 @@ function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPr
     title = t('next.pickProfileTitle');
     text = t('next.pickProfileText');
     actions = <Button className="primary" icon="sliders" onClick={() => onTab('settings')}>{t('next.openSettings')}</Button>;
+  } else if (!total && songMode(o) && !o.lyrics) {
+    icon = 'mic';
+    title = t('next.songLyricsTitle');
+    text = t('next.songLyricsText');
+    actions = <Button className="primary" icon="music" onClick={() => onTab('music')}>{t('next.openMusic')}</Button>;
+  } else if (!total && songMode(o) && !o.music_file) {
+    icon = 'music';
+    title = t('next.songUploadTitle');
+    text = t('next.songUploadText');
+    actions = (
+      <>
+        <Button className="primary" icon="music" onClick={() => onTab('music')}>{t('next.openMusic')}</Button>
+        <Button icon="sparkles" onClick={onPlan}>{t('next.planWithoutSong')}</Button>
+      </>
+    );
+  } else if (!total && songMode(o)) {
+    title = t('next.songPlanTitle');
+    text = t('next.songPlanText');
+    actions = <Button className="primary" icon="sparkles" onClick={onPlan}>{t('next.songPlanCta')}</Button>;
   } else if (!total) {
     title = t('next.planTitle');
     text = t('next.planText');
@@ -316,13 +337,14 @@ export default function ProjectEditor({ projectId }) {
     if (i != null) { setSource('scene'); setTab('storyboard'); }
   };
 
-  const steps = [
-    { label: t('step.idea'), done: Boolean(project.prompt.trim()) },
-    { label: t('step.storyboard'), done: project.scenes.length > 0 },
-    { label: t('step.renderClips'), done: project.scenes.length > 0 && clipsReady === project.scenes.length },
-    { label: t('step.music'), done: project.scenes.length > 0 && (o.music_mode === 'none' || Boolean(o.music_file)) },
-    { label: t('step.finalVideo'), done: hasFinal },
-  ];
+  const ideaStep = { label: t('step.idea'), done: Boolean(project.prompt.trim()) };
+  const storyboardStep = { label: t('step.storyboard'), done: project.scenes.length > 0 };
+  const clipsStep = { label: t('step.renderClips'), done: project.scenes.length > 0 && clipsReady === project.scenes.length };
+  const finalStep = { label: t('step.finalVideo'), done: hasFinal };
+  const steps = songMode(o)
+    ? [ideaStep, { label: t('step.song'), done: Boolean(o.lyrics && o.music_file) }, storyboardStep, clipsStep, finalStep]
+    : [ideaStep, storyboardStep, clipsStep,
+      { label: t('step.music'), done: project.scenes.length > 0 && (o.music_mode === 'none' || Boolean(o.music_file)) }, finalStep];
   const failedScenes = project.scenes.filter((s) => sceneState(s) === 'failed').length;
   const tabs = [
     ['storyboard', 'layers', t('editor.tabStoryboard'), project.scenes.length ? <span className="count">{project.scenes.length}</span> : null, failedScenes > 0],
@@ -383,7 +405,7 @@ export default function ProjectEditor({ projectId }) {
               onRegenerate={regenerate} onPlan={plan} saving={saving} run={run} />
           )}
           {tab === 'music' && (
-            <MusicPanel project={project} busy={busy} clipsReady={clipsReady} run={run} setOption={setOption} toast={toast} />
+            <MusicPanel project={project} busy={busy} clipsReady={clipsReady} run={run} setOption={setOption} toast={toast} onPlan={plan} />
           )}
           {tab === 'edit' && (
             <div className="stack">

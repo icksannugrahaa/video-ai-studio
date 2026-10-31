@@ -616,13 +616,61 @@ def test_long_section_bounces_the_clip_and_trailing_silence_is_ignored(tmp_path)
 
 
 
+def test_song_plan_writes_lyrics_with_the_storyboard(app, client, fake_client):
+    pid = _setup(client, music_style="song", music_mode="external")["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    options = client.get(f"/api/projects/{pid}").json()["options"]
+    assert "Kucing kecil terbang tinggi" in options["lyrics"]
+    assert "Kucing kecil terbang tinggi" in options["music_prompt"]
+
+    mine = "[0:00] Lirik buatan saya"  # a new plan never overwrites lyrics the user has
+    client.patch(f"/api/projects/{pid}", json={"options": {"lyrics": mine}})
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    assert client.get(f"/api/projects/{pid}").json()["options"]["lyrics"] == mine
+
+
+def test_song_plan_keeps_the_storyboard_when_lyrics_fail(app, client, fake_client, monkeypatch):
+    from app.pipeline import planner
+    def refuse(*args, **kwargs):
+        raise planner.PlanError("model tidak mengembalikan lirik bertimestamp")
+    monkeypatch.setattr(planner, "song_from_idea", refuse)
+    pid = _setup(client, music_style="song", music_mode="external")["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "succeeded" and detail["scenes"]
+    assert not detail["options"].get("lyrics")
+
+
+def test_lyrics_can_be_written_before_any_scene(app, client, fake_client):
+    pid = _setup(client, music_style="song", music_mode="external")["id"]
+    detail = client.post(f"/api/projects/{pid}/song", json={"hint": ""}).json()
+    assert "Kucing kecil terbang tinggi" in detail["options"]["lyrics"] and not detail["scenes"]
+    assert "Kucing kecil terbang tinggi" in detail["options"]["music_prompt"]
+
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    detail2 = client.get(f"/api/projects/{pid}").json()
+    assert detail2["scenes"] and detail2["options"]["lyrics"] == detail["options"]["lyrics"]
+    assert detail2["options"]["music_prompt"] == detail["options"]["music_prompt"]  # the storyboard must not replace it
+
+
+def test_instrumental_plan_writes_no_lyrics(app, client, fake_client):
+    pid = _setup(client, music_style="instrumental", music_mode="external")["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    assert not client.get(f"/api/projects/{pid}").json()["options"].get("lyrics")
+
+
 @needs_ffmpeg
 def test_song_render_writes_missing_lyrics_and_prompt_first(app, client, fake_client):
     project = _setup(client, music_style="song", music_mode="external")
     pid = project["id"]
     client.post(f"/api/projects/{pid}/plan")
     _run_jobs(app)
-    client.patch(f"/api/projects/{pid}", json={"options": {"music_prompt": ""}})
+    client.patch(f"/api/projects/{pid}", json={"options": {"lyrics": "", "music_prompt": ""}})
     fake_client.calls.clear()
     client.post(f"/api/projects/{pid}/render", json={"confirm": True})
     _run_jobs(app)

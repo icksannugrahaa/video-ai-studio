@@ -297,11 +297,33 @@ def _ask_json(client, model: str, instructions: str, request: str, temperature: 
         return extract_json(client.chat(model, messages, temperature=0.2))
 
 
-def plan_storyboard(client, model: str, *, prompt: str, language: str, clip_seconds: int,
-                    target_seconds: int, limit_seconds: int, aspect: str, song: bool = False) -> dict:
-    rules = _rules(language, clip_seconds, min(target_seconds, limit_seconds), limit_seconds, aspect, song)
-    data = _ask_json(client, model, _SYSTEM.format(**rules), "Video idea: " + prompt, temperature=0.7)
-    return normalize(data, clip_seconds=clip_seconds, limit_seconds=limit_seconds)
+_FROM_SONG = """
+
+The song already exists, so the picture follows it. Write exactly {count} scenes, one for each part below and in this
+order. Each visual_prompt shows what is sung in that part, at the moment it is sung, keeping its numbers, names and
+objects exact; a part with no words shows a matching instrumental moment. Copy each part's words into "narration".
+{parts}"""
+
+
+def plan_storyboard(client, model: str, *, prompt: str, language: str, clip_seconds: int, target_seconds: int,
+                    limit_seconds: int, aspect: str, song: bool = False, lyrics: str = "",
+                    song_seconds: float | None = None) -> dict:
+    """Scenes for an idea. With timed lyrics they follow the song: its lines decide
+    how many scenes there are, what each says and how long it lasts."""
+    total = song_seconds or target_seconds
+    parts = lyric_parts(lyrics, total, clip_seconds) if lyrics else []
+    request = "Video idea: " + prompt
+    if parts:
+        listed = "\n".join(f"{i + 1}. {_clock(start)}-{_clock(end)}: {words or '(instrumental)'}"
+                           for i, (start, end, words) in enumerate(parts))
+        request += _FROM_SONG.format(count=len(parts), parts=listed)
+    rules = _rules(language, clip_seconds, min(total, limit_seconds), limit_seconds, aspect, song)
+    data = _ask_json(client, model, _SYSTEM.format(**rules), request, temperature=0.7)
+    board = normalize(data, clip_seconds=clip_seconds, limit_seconds=limit_seconds)
+    if len(board["scenes"]) == len(parts):
+        for scene, (start, end, words) in zip(board["scenes"], parts):
+            scene["duration"], scene["narration"] = round(end - start, 3), words
+    return board
 
 
 def edit_storyboard(client, model: str, *, storyboard: dict, instruction: str, language: str,
@@ -352,6 +374,17 @@ unless the video is shorter than 40 seconds (then at most 2-3 seconds). {hint}
 Reply with JSON only:
 {{"style": "...", "vocal": "...", "sections": [{{"name": "Verse 1", "lines": [{{"t": 4, "text": "..."}}]}}]}}"""
 
+_SONG_FIRST = """You are a songwriter for short videos. Write an original song from the video idea below; the video will
+later be cut to this song. Lyrics language: {language}. Total length {length} ({total} seconds). Group the lines into
+sections (e.g. Intro (instrumental), Verse, Chorus, Outro). The chorus may repeat. Every lyric line has "t": the second
+(from 0) it starts, at least 2.5 seconds apart, lines short and singable (max 9 words), with rhymes. Each line names
+something that can be shown on screen, and keeps learning content exact and in order. Leave the last 5-8 seconds for
+an instrumental outro, unless the song is shorter than 40 seconds (then at most 2-3 seconds). {hint}
+"style": English music style for the generator (genre, mood, tempo BPM, instruments).
+"vocal": English vocal description (e.g. "cheerful young female vocal").
+Reply with JSON only:
+{{"style": "...", "vocal": "...", "sections": [{{"name": "Verse 1", "lines": [{{"t": 4, "text": "..."}}]}}]}}"""
+
 _LRC_RE = re.compile(r"^\[(\d+):(\d{1,2}(?:\.\d+)?)\]\s*(.*)$")
 
 
@@ -377,6 +410,18 @@ def song_plan(client, model: str, *, title: str, scenes: list[dict], language: s
                                 hint=("Extra direction from the user: " + hint) if hint else "")
     data = _ask_json(client, model, instructions, f"Video title: {title or '-'}\nScenes:\n" + "\n".join(outline),
                      temperature=0.8)
+    return _song_result(data, total)
+
+
+def song_from_idea(client, model: str, *, idea: str, language: str, seconds: int, hint: str = "") -> dict:
+    """Lyrics + song prompt written before any scene exists (same result as
+    :func:`song_plan`), for the flow where the scenes follow the song."""
+    instructions = _SONG_FIRST.format(language=language, length=_clock(seconds), total=seconds,
+                                      hint=("Extra direction from the user: " + hint) if hint else "")
+    return _song_result(_ask_json(client, model, instructions, "Video idea: " + idea, temperature=0.8), seconds)
+
+
+def _song_result(data: dict, total: int) -> dict:
     blocks: list[str] = []
     last_t = -1.0
     for section in data.get("sections") or []:
@@ -448,6 +493,24 @@ def song_lengths(scenes: list[dict], lyrics: str, music_seconds: float | None = 
     edges.append(end)
     lengths = [round(b - a, 3) for a, b in zip(edges, edges[1:])]
     return lengths if min(lengths) >= 1.0 else None
+
+
+def lyric_parts(lyrics: str, total: float, clip_seconds: int) -> list[tuple[float, float, str]]:
+    """The song cut into clip-sized parts ``(start, end, words)``. Cuts fall on
+    the start of a sung line when one fits; a long instrumental stretch is split
+    evenly by clip length. A tail too short to film joins the part before it."""
+    timed = _timed_lines(lyrics)
+    lines = [(t, text) for t, text in timed if text and t < total]
+    if not lines or total <= 0:
+        return []
+    edges = [0.0]
+    while total - edges[-1] > clip_seconds:
+        fits = [t for t, _ in lines if edges[-1] < t <= edges[-1] + clip_seconds]
+        edges.append(fits[-1] if fits else edges[-1] + clip_seconds)
+    if len(edges) > 1 and total - edges[-1] < min_clip_seconds(clip_seconds):
+        edges.pop()
+    edges.append(float(total))
+    return [(a, b, " ".join(text for t, text in lines if a <= t < b)) for a, b in zip(edges, edges[1:])]
 
 
 def fit_lengths(durations: list[float], total: float) -> list[float]:

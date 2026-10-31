@@ -25,7 +25,7 @@ function Choice({ active, icon, title, desc, disabled, onClick }) {
   );
 }
 
-export default function MusicPanel({ project, busy, clipsReady, run, setOption, toast }) {
+export default function MusicPanel({ project, busy, clipsReady, run, setOption, toast, onPlan }) {
   const t = useT();
   const o = project.options;
   const id = project.id;
@@ -38,7 +38,8 @@ export default function MusicPanel({ project, busy, clipsReady, run, setOption, 
   React.useEffect(() => { setPrompt(o.music_prompt || ''); }, [o.music_prompt]);
   React.useEffect(() => { setLyrics(o.lyrics || ''); }, [o.lyrics]);
 
-  const total = Math.round(totalSeconds(project.scenes));
+  const songFirst = song && !project.scenes.length; // the scenes will follow this song
+  const total = songFirst ? project.target_seconds : Math.round(totalSeconds(project.scenes));
   const allClips = project.scenes.length > 0 && clipsReady === project.scenes.length;
   const save = (options, msg = t('music.savedDefault')) => run(() => api.patch(`/projects/${id}`, { options }), msg);
 
@@ -89,14 +90,14 @@ export default function MusicPanel({ project, busy, clipsReady, run, setOption, 
         <div className="steps">
           {song && (
             <div className="s"><div>
-              <h3>{t('music.lyricsTitle')}</h3>
+              <h3>{songFirst ? t('music.lyricsTitleFirst') : t('music.lyricsTitle')}</h3>
               <p className="muted small" style={{ margin: 0 }}>
                 {t('music.lyricsHint1')} <code>[m:ss] {t('music.lyricsHintText')}</code>{t('music.lyricsHint2')}
               </p>
               <div className="row">
                 <input className="grow" style={{ minWidth: 200 }} value={hint} placeholder={t('music.songHintPlaceholder')}
                   onChange={(e) => setHint(e.target.value)} />
-                <Button className="primary" icon="sparkles" loading={generating} disabled={!project.scenes.length}
+                <Button className="primary" icon="sparkles" loading={generating}
                   onClick={() => generate('song', t('music.lyricsReady'))}>
                   {generating ? t('music.writing') : o.lyrics ? t('music.rewrite') : t('music.generateLyrics')}
                 </Button>
@@ -113,10 +114,10 @@ export default function MusicPanel({ project, busy, clipsReady, run, setOption, 
           <div className="s"><div>
             <h3>{song ? t('music.copyPromptSong') : t('music.copyPromptMusic')}</h3>
             <p className="muted small" style={{ margin: 0 }}>
-              {t('music.copyPromptHint1')}<b>{fmtClock(total)}</b>{t('music.copyPromptHint2')}
+              {t('music.copyPromptHint1')}<b>{fmtClock(total)}</b>{songFirst ? t('music.copyPromptHint2First') : t('music.copyPromptHint2')}
             </p>
             <textarea rows={5} value={prompt}
-              placeholder={project.scenes.length ? t('music.promptPlaceholderReady') : t('music.promptPlaceholderEmpty')}
+              placeholder={songFirst ? t('music.promptPlaceholderFirst') : project.scenes.length ? t('music.promptPlaceholderReady') : t('music.promptPlaceholderEmpty')}
               onChange={(e) => setPrompt(e.target.value)} />
             <div className="row">
               <CopyButton text={prompt} label={t('music.copyPrompt')} className="primary" />
@@ -152,6 +153,16 @@ export default function MusicPanel({ project, busy, clipsReady, run, setOption, 
               )}
             </Dropzone>
           </div></div>
+
+          {songFirst && o.music_file && (
+            <div className="s"><div>
+              <h3>{t('music.planFromSongTitle')}</h3>
+              <p className="muted small" style={{ margin: 0 }}>{t('music.planFromSongHint')}</p>
+              <div className="row">
+                <Button className="primary" icon="sparkles" disabled={busy} onClick={onPlan}>{t('music.planFromSong')}</Button>
+              </div>
+            </div></div>
+          )}
         </div>
       )}
 

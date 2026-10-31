@@ -404,6 +404,42 @@ def test_clip_prompt_adds_production_direction_and_seed_order():
     assert planner.clip_prompt({}, "A cat jumps") == "A cat jumps"  # projects without a bible keep their prompt
 
 
+def test_lyric_parts_cut_on_sung_lines_and_cover_the_song():
+    lyrics = "[Intro]\n[0:03] Satu apel\n[0:07] Dua apel\n[0:12] Tiga apel\n[0:27] Selesai"
+    parts = planner.lyric_parts(lyrics, 30.0, 5)
+    assert parts[0] == (0.0, 3.0, "") and parts[1] == (3.0, 7.0, "Satu apel") and parts[2] == (7.0, 12.0, "Dua apel")
+    assert parts[-1][1] == 30.0 and all(a[1] == b[0] for a, b in zip(parts, parts[1:]))
+    assert all(end - start <= 5 for start, end, _ in parts[:-1])
+    assert " ".join(words for _, _, words in parts).split() == "Satu apel Dua apel Tiga apel Selesai".split()
+    assert planner.lyric_parts("tanpa waktu", 30.0, 5) == []
+    tail = planner.lyric_parts("[0:04] a", 9.5, 5)  # 0.5 s left over is too short to film
+    assert tail[-1][1] == 9.5 and tail[-1][1] - tail[-1][0] >= 2
+
+
+def _board(count):
+    return json.dumps({"scenes": [{"visual_prompt": f"shot {i}", "narration": "x", "duration": 5} for i in range(count)]})
+
+
+def test_storyboard_takes_its_timing_and_words_from_the_song():
+    class Chat:
+        request = ""
+        reply = _board(2)
+        def chat(self, model, messages, temperature=0.7, max_tokens=4096):
+            Chat.request = messages[-1]["content"]
+            return Chat.reply
+    args = dict(prompt="ide", language="id-ID", clip_seconds=5, target_seconds=30, limit_seconds=180, aspect="9:16")
+    board = planner.plan_storyboard(Chat(), "m", **args, song=True, lyrics="[0:00] Satu apel\n[0:04] Dua apel", song_seconds=8.0)
+    assert "exactly 2 scenes" in Chat.request and "0:04-0:08: Dua apel" in Chat.request
+    assert [(s["duration"], s["narration"]) for s in board["scenes"]] == [(4.0, "Satu apel"), (4.0, "Dua apel")]
+
+    Chat.reply = _board(3)  # a wrong count keeps the model's scenes; the render still cuts them to the song
+    board = planner.plan_storyboard(Chat(), "m", **args, song=True, lyrics="[0:00] Satu apel\n[0:04] Dua apel", song_seconds=8.0)
+    assert [s["duration"] for s in board["scenes"]] == [5.0, 5.0, 5.0]
+
+    planner.plan_storyboard(Chat(), "m", **args)
+    assert "The song already exists" not in Chat.request
+
+
 def test_counted_objects_are_placed_once_and_have_room():
     from app.pipeline import planner
     assert "never repeated" in planner.SHOT_CRAFT and "none is stacked" in planner.SHOT_CRAFT

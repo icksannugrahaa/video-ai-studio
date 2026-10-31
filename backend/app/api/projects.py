@@ -309,18 +309,24 @@ def regenerate_music_prompt(project_id: int, body: MusicPromptBody, user: dict =
 @router.post("/projects/{project_id}/song")
 def generate_song(project_id: int, body: MusicPromptBody, user: dict = Depends(current_user),
                   svc=Depends(services)):
-    """Write timed lyrics from the scenes + a song prompt (sync, works during a render)."""
+    """Write timed lyrics + a song prompt (sync, works during a render): from the
+    scenes when they exist, else from the idea, and the scenes will follow them."""
     project = _project(svc, user, project_id)
     scenes = svc.repo.scenes(project_id)
-    if not scenes:
-        raise HTTPException(400, "storyboard kosong — jalankan Plan dulu")
+    if not scenes and not project["prompt"].strip():
+        raise HTTPException(400, "isi prompt / ide video dulu")
     profile = svc.repo.profile(user["id"], project["profile_id"]) if project["profile_id"] else None
     if not profile or not profile["chat_model"]:
         raise HTTPException(400, "profil provider / model chat belum diatur")
     client = svc.client_factory(profile["base_url"], svc.box.decrypt(profile["api_key_enc"]))
     try:
-        song = planner.song_plan(client, profile["chat_model"], title=project["title"], scenes=scenes,
-                                 language=project["language"], hint=body.hint.strip())
+        if scenes:
+            song = planner.song_plan(client, profile["chat_model"], title=project["title"], scenes=scenes,
+                                     language=project["language"], hint=body.hint.strip())
+        else:
+            song = planner.song_from_idea(client, profile["chat_model"], idea=project["prompt"],
+                                          language=project["language"], seconds=int(project["target_seconds"]),
+                                          hint=body.hint.strip())
     except (ProviderError, planner.PlanError) as exc:
         raise HTTPException(502, getattr(exc, "message", None) or str(exc)) from exc
     svc.repo.update_project(user["id"], project_id, {"options": {

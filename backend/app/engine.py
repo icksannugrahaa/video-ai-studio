@@ -157,21 +157,42 @@ class Engine:
         project, profile, client, preset = self._context(job)
         if not profile["chat_model"]:
             raise JobFailed("profil belum memilih model chat")
-        self._progress(job, 0.1, "Menyusun storyboard…")
+        project = self._song_first(job, project, profile, client)
+        self._progress(job, 0.3, "Menyusun storyboard…")
+        ws = Workspace(self.settings.projects_dir, project["id"])
+        music = self._music_path(project, ws) if self._is_song(project) else None
+        lyrics = project["options"].get("lyrics") or "" if self._is_song(project) else ""
         board = planner.plan_storyboard(
             client, profile["chat_model"], prompt=project["prompt"], language=project["language"],
             clip_seconds=int(profile["clip_seconds"]), target_seconds=int(project["target_seconds"]),
             limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
+            lyrics=lyrics, song_seconds=media.audible_end(music) if music else None,
         )
         diff = self.repo.replace_scenes(project["id"], board["scenes"])
         update = {"status": "planned"}
         if board["title"] and not project["title"]:
             update["title"] = board["title"]
         update["options"] = _bible_options(board)
-        if board.get("music_prompt"):
+        if board.get("music_prompt") and not lyrics:  # a song prompt carries the lyrics: keep it
             update["options"]["music_prompt"] = board["music_prompt"]
         self.repo.update_project(job["user_id"], project["id"], update)
         return {"scenes": len(board["scenes"]), **diff}
+
+    def _song_first(self, job, project, profile, client) -> dict:
+        """Song mode: the scenes follow the lyrics, so missing lyrics come first. If
+        they cannot be written the storyboard is still planned from the idea and
+        the button (or the render) writes them later."""
+        if not self._is_song(project) or (project["options"].get("lyrics") or "").strip():
+            return project
+        self._progress(job, 0.1, "Menulis lirik & prompt musik…")
+        try:
+            song = planner.song_from_idea(client, profile["chat_model"], idea=project["prompt"],
+                                          language=project["language"], seconds=int(project["target_seconds"]))
+        except (ProviderError, planner.PlanError) as exc:
+            log.warning("project %s lyrics not written: %s", project["id"], type(exc).__name__)
+            return project
+        self.repo.update_project(job["user_id"], project["id"], {"options": song})
+        return self.repo.project(job["user_id"], project["id"]) or project
 
     def run_music_prompt(self, job: dict) -> dict:
         project, profile, client, _preset = self._context(job)
