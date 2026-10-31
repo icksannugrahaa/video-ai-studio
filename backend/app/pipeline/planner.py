@@ -73,7 +73,10 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   untouched>. END: <the last frame, in the same terms as START>."
   Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
-  equal the count in START plus what ACTION adds. Vary shot sizes between sequences
+  equal the count in START plus what ACTION adds. The placing is done by the third second of the clip and the hands
+  then leave the objects alone until END. The first shot of a counting sequence leaves visible empty space, in the
+  frame and on the surface, for the final count (e.g. a long table with the row starting at its far left), and ACTION
+  names the free spot for each new object. Vary shot sizes between sequences
   (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
   Refer to the character as "the character" (or
   the cast by their names); do NOT re-describe the character, the world or the style (the bible is added automatically). Keep the time of day
@@ -82,7 +85,8 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   this clip from the last frame of the previous clip), false when the location or time changes. Group the story
   into sequences of continuous shots per location; the first scene is always false. A continuing shot starts
   exactly where the previous one ended: its START repeats the previous END word for word, so keep its shot size, camera position and the characters' screen
-  positions. Steps of one lesson or song at the same spot all stay continuous with a fixed camera ("the camera
+  positions. Steps of one lesson or song at the same spot, including the closing shot, which shows the objects exactly
+  as the last step left them, all stay continuous with a fixed camera ("the camera
   stays still"): no close-ups, no zooms or push-ins and no view from the other side, which flip the room and push
   the objects out of frame.
 - "narration": voice-over spoken during the scene, in {language}. At most {words} words per scene
@@ -118,7 +122,9 @@ BIBLE_KEYS = ("character", "world", "style")
 SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believable weight and timing in every "
               "movement, smooth motivated camera work, steady light and exposure. Faces, hands and objects keep their "
               "shape from the first to the last frame, with no morphing or flicker, and the number of objects changes "
-              "only by what the action itself adds or removes.")
+              "only by what the action itself adds or removes. Bringing in or placing an object happens once and is "
+              "never repeated; after it no further object enters the frame, none is stacked unless the shot says so, "
+              "and the objects stay exactly as they are until the last frame.")
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
                "positions. Every object in the image is there from the first frame and stays in place; "
                "nothing disappears or resets.")

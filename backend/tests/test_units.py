@@ -337,6 +337,13 @@ def test_clip_prompt_adds_production_direction_and_seed_order():
     assert planner.clip_prompt({}, "A cat jumps") == "A cat jumps"  # projects without a bible keep their prompt
 
 
+def test_counted_objects_are_placed_once_and_have_room():
+    from app.pipeline import planner
+    assert "never repeated" in planner.SHOT_CRAFT and "none is stacked" in planner.SHOT_CRAFT
+    assert "by the third second" in planner._SYSTEM and "empty space" in planner._SYSTEM
+    assert "including the closing shot" in planner._SYSTEM
+
+
 def test_continuing_shot_starts_in_the_state_the_previous_shot_ends_in():
     from app.pipeline import planner
     first = "Medium shot. START: two apples. ACTION: adds one. END: exactly three apples, no others."
