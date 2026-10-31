@@ -169,6 +169,73 @@ def test_client_poll_survives_network_errors_and_maps_failures():
 
 
 
+def _sse(*lines):
+    r = _resp(ctype="text/event-stream; charset=utf-8")
+    r.iter_lines.return_value = [line.encode("utf-8") for line in lines]
+    return r
+
+
+def _chat_client(resp):
+    session = mock.MagicMock()
+    session.request.return_value = resp
+    return ProviderClient("https://ai.example.com", "sk-secret", session=session), session
+
+
+def test_chat_streams_so_the_router_heartbeat_outlives_the_proxy_timeout():
+    client, session = _chat_client(_sse(
+        ": keep-alive", "",
+        'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+        'data: {"choices":[{"delta":{"content":"Apel "}}]}',
+        'data: {"choices":[{"delta":{"content":"merah é"}}]}',
+        "data: [DONE]"))
+    assert client.chat("m", [{"role": "user", "content": "x"}]) == "Apel merah é"
+    kwargs = session.request.call_args.kwargs
+    assert kwargs["json"]["stream"] is True and kwargs["stream"] is True
+
+
+def test_chat_accepts_a_plain_json_reply_and_a_whole_message_in_the_stream():
+    client, _ = _chat_client(_resp(200, {"choices": [{"message": {"content": "halo"}}]}))
+    assert client.chat("m", []) == "halo"
+    client, _ = _chat_client(_sse('data: {"choices":[{"message":{"content":"utuh"}}]}', "data: [DONE]"))
+    assert client.chat("m", []) == "utuh"
+
+
+def test_chat_reports_errors_inside_the_stream_and_a_broken_stream():
+    import requests as _requests
+    client, _ = _chat_client(_sse(": keep-alive", 'data: {"error":{"message":"semua provider gagal","status":503}}'))
+    with pytest.raises(ProviderError) as err:
+        client.chat("m", [])
+    assert err.value.status == 503 and err.value.retryable and "semua provider gagal" in err.value.message
+
+    broken = _sse()
+    broken.iter_lines.side_effect = _requests.exceptions.ChunkedEncodingError("cut")
+    client, _ = _chat_client(broken)
+    with pytest.raises(ProviderError) as err:
+        client.chat("m", [])
+    assert err.value.retryable and "sk-secret" not in err.value.message
+
+    client, _ = _chat_client(_sse(": keep-alive", "data: [DONE]"))
+    with pytest.raises(ProviderError, match="tidak mengembalikan teks"):
+        client.chat("m", [])
+
+
+def test_chat_gives_up_when_only_keep_alives_arrive():
+    client, _ = _chat_client(_sse(": keep-alive", ": keep-alive"))
+    with mock.patch("app.providers.client.time.monotonic", side_effect=[0, 10 ** 6]), \
+            pytest.raises(ProviderError, match="timeout") as err:
+        client.chat("m", [])
+    assert err.value.status == 504
+
+
+def test_error_page_html_never_reaches_the_user():
+    page = mock.MagicMock(status_code=524, text="<!DOCTYPE html><html>Cloudflare</html>")
+    page.json.side_effect = ValueError
+    client, _ = _chat_client(page)
+    with pytest.raises(ProviderError) as err:
+        client.chat("m", [])
+    assert "<" not in err.value.message and "HTTP 524" in err.value.message
+
+
 def test_policy_refusal_is_not_retried():
     session = mock.MagicMock()
     session.request.side_effect = [_resp(202, {"id": "j9"}), _resp(200, {"status": "failed", "error": {
