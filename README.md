@@ -6,6 +6,7 @@ The app has no AI of its own: each user supplies an **OpenAI-compatible endpoint
 
 <p>
   <img alt="CI" src="https://github.com/icksannugrahaa/video-ai-studio/actions/workflows/ci.yml/badge.svg">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10-blue">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-%E2%89%A50.110-009688">
   <img alt="React" src="https://img.shields.io/badge/React-18-61dafb">
@@ -154,4 +155,12 @@ docs/             # API.md, specs/
 
 ## License
 
-Not yet determined.
+[MIT](LICENSE) © 2026 Icksan Nugraha.
+
+You are free to use, modify, and self-host this software, including
+commercially. There is no warranty of any kind — see [LICENSE](LICENSE) for the
+full text.
+
+Note that the license covers this source code only. Videos you generate, the
+model providers you connect, and any music or footage you upload remain subject
+to their own terms.
