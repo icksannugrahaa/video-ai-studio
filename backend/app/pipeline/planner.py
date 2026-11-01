@@ -79,7 +79,10 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   written with its full location (never a shorthand like "right-end basket"), and START and END of this shot and of every later shot in
   the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
   exactly two more in a basket on the front right corner of the table, no other apples"), so it never vanishes and later shots take
-  from the same spot. The first shot of a counting sequence leaves visible empty space, in the
+  from the same spot. An emptied container is written as empty, never as "exactly 0". ACTION names each object's spot
+  from the object before it ("directly to the right of the third apple"), never "the next empty spot". The first shot of
+  a sequence gives every person's place on screen and nobody sits or stands between the camera and the objects (e.g. one
+  child at each end of the table, turned three-quarters toward the camera). The first shot of a counting sequence leaves visible empty space, in the
   frame and on the surface, for the final count (e.g. a long table with the row starting at its far left), and ACTION
   names the free spot for each new object. Vary shot sizes between sequences
   (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
@@ -203,6 +206,19 @@ def end_checks(visual_prompt: str) -> dict | None:
     if not (count or words):
         return None
     return {"count": number or None, "noun": count.group(2).lower() if count else "", "visible": list(dict.fromkeys(words))}
+
+
+def sequence_checks(scenes: list[dict], scene: dict) -> dict | None:
+    """``end_checks`` plus the containers of the earlier shots of its sequence:
+    they are still in the room even when this shot's wording does not mention them."""
+    checks = end_checks(scene["visual_prompt"]) or {"count": None, "noun": "", "visible": []}
+    ordered = sorted(scenes, key=lambda s: s["idx"])
+    at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
+    while at > 0 and ordered[at].get("continues"):
+        at -= 1
+        earlier = end_checks(ordered[at]["visual_prompt"])
+        checks["visible"] += [w for w in (earlier["visible"] if earlier else []) if w not in checks["visible"]]
+    return checks if checks["count"] or checks["visible"] else None
 
 
 def end_question(checks: dict) -> str:

@@ -536,6 +536,17 @@ def test_end_checks_find_the_container_however_the_planner_words_it():
     assert planner.end_checks("START: a. ACTION: b. END: exactly three apples in row, no other apples.")["visible"] == []
 
 
+def test_later_shots_of_a_sequence_also_check_the_container_of_earlier_shots():
+    from app.pipeline import planner
+    scenes = [{"idx": 0, "continues": 0, "visual_prompt": "START: a. ACTION: takes 1 apple from basket. END: row: exactly 3 apples."},
+              {"idx": 1, "continues": 1, "visual_prompt": "START: a. ACTION: sways. END: row: exactly 3 apples."},
+              {"idx": 2, "continues": 1, "visual_prompt": "START: a. ACTION: sways. END: she smiles."},
+              {"idx": 3, "continues": 0, "visual_prompt": "START: a. ACTION: runs. END: exactly 2 dogs."}]
+    assert planner.sequence_checks(scenes, scenes[1])["visible"] == ["basket"]
+    assert planner.sequence_checks(scenes, scenes[2]) == {"count": None, "noun": "", "visible": ["basket"]}
+    assert planner.sequence_checks(scenes, scenes[3])["visible"] == []  # a new location does not inherit it
+
+
 def test_fixed_camera_shots_get_the_tripod_order():
     from app.pipeline import planner
     options = {"bible_style": "35mm look"}

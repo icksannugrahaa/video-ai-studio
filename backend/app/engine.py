@@ -475,10 +475,9 @@ class Engine:
         except media.MediaError:
             return False
 
-    def _end_state_problems(self, profile, client, scene, clip: Path) -> list[str]:
+    def _end_state_problems(self, profile, client, scene, clip: Path, checks: dict | None) -> list[str]:
         """What the clip's last frame lacks compared to its END. It seeds the next
         clip, so whatever is lost here stays lost. A failed check is no finding."""
-        checks = planner.end_checks(scene["visual_prompt"])
         if not checks or not profile["chat_model"]:
             return []
         frame = clip.with_name(f"{clip.stem}_end.jpg")
@@ -501,11 +500,13 @@ class Engine:
         shown on the scene. The first clip is already saved, so a failed retake
         costs nothing."""
         prev = self._previous_clip(project, scene, ws)
-        first = next(s for s in self.repo.scenes(project["id"]) if s["id"] == scene["id"])
+        scenes = self.repo.scenes(project["id"])
+        first = next(s for s in scenes if s["id"] == scene["id"])
+        checks = planner.sequence_checks(scenes, first)
 
         def flaws(clip: Path) -> tuple[list[str], float]:
             gap = media.seam_gap(prev, clip) if seed is not None and prev else 0.0
-            return self._end_state_problems(profile, client, scene, clip), gap
+            return self._end_state_problems(profile, client, scene, clip, checks), gap
 
         left: list[str] = []
         try:
