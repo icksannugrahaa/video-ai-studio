@@ -547,6 +547,20 @@ def test_later_shots_of_a_sequence_also_check_the_container_of_earlier_shots():
     assert planner.sequence_checks(scenes, scenes[3])["visible"] == []  # a new location does not inherit it
 
 
+def test_generated_project_11_wording_gets_no_false_check_and_no_bloat():
+    from app.pipeline import planner
+    shot = ("Table. START: exactly 1 red apple row far left, exactly 4 in basket front right corner, no other apples. "
+            "ACTION: Melati takes 1 from basket, places right of first. "
+            "END: exactly 2 red apples row far left, exactly 3 in basket front right corner, no other apples.")
+    scenes = [{"visual_prompt": shot, "continues": False}]
+    planner.keep_sources(scenes)
+    assert scenes[0]["visual_prompt"] == shot  # it already says where the basket is
+    assert planner.end_checks(shot)["visible"] == ["basket"]  # never asks for a "corner"
+    bare = [{"visual_prompt": "T. START: a basket, 2 apples. ACTION: takes 1 from basket. END: basket empty.", "continues": False}]
+    planner.keep_sources(bare)
+    assert len(bare[0]["visual_prompt"].split()) < 50
+
+
 def test_fixed_camera_shots_get_the_tripod_order():
     from app.pipeline import planner
     options = {"bible_style": "35mm look"}

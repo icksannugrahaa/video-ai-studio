@@ -51,9 +51,10 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   different from famous copyrighted characters (e.g. Garfield, Disney/Pixar/DreamWorks characters).
   If the story has no single main character, describe the recurring subject instead.
 - "world": the ONE place the whole story happens in, 40-80 words: city/region and country, era, architecture,
-  building materials, colour palette, vehicles, signage language, vegetation, climate. Every scene stays inside
+  building materials, colour palette, vehicles, vegetation, climate. No readable signs, labels or lettering anywhere:
+  generated text comes out garbled. Every scene stays inside
   this world: if the story is in Jakarta, every street, shop, train and skyline must look like Jakarta, Indonesia
-  (Indonesian-language signs, local vehicles) — never like another country. Describe only the general look of the
+  (local vehicles and vegetation) — never like another country. Describe only the general look of the
   place; do NOT list story props or room-specific objects here (it is pasted into every shot, so a sink or a broom
   named here would appear in every room). Props belong in the visual_prompt of the scenes that need them.
 - "style": one line that fixes the look of the whole video: the medium the user asked for (if they named none, choose
@@ -80,7 +81,7 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
   exactly two more in a basket on the front right corner of the table, no other apples"), so it never vanishes and later shots take
   from the same spot. ACTION says the hand takes each object from it ("takes one apple from the basket, places it ...")
-  so nothing appears from nowhere, and END is the pose ACTION finishes in. An emptied container is written as empty, never as "exactly 0". ACTION names each object's spot
+  so nothing appears from nowhere, always naming the object, and END is the pose ACTION finishes in. An emptied container is written as empty, never as "exactly 0". ACTION names each object's spot
   from the object before it ("directly to the right of the third apple"), never "the next empty spot". The first shot of
   a sequence gives every person's place on screen and nobody sits or stands between the camera and the objects (e.g. one
   child at each end of the table, turned three-quarters toward the camera). The first shot of a counting sequence leaves visible empty space, in the
@@ -155,7 +156,7 @@ _SOURCE_RE = re.compile(r"\b(?:lifts?|takes?|picks?|pulls?|grabs?|brings?|draws?
 
 def _is_placed(text: str, word: str) -> bool:
     """Whether the text says where the object is, not only that it exists."""
-    return re.search(rf"\b{re.escape(word)}\b[^.;,]*\b(?:on|at|beside|near|under|behind)\b", text, re.I) is not None
+    return re.search(rf"\b{re.escape(word)}\b[^.;,]*\b(?:on|at|beside|near|under|behind|front|left|right|corner|stays in clear view)\b", text, re.I) is not None
 
 
 def keep_sources(scenes: list[dict]) -> None:
@@ -174,9 +175,8 @@ def keep_sources(scenes: list[dict]) -> None:
         for found in _SOURCE_RE.finditer(action.group(1)):
             sources.setdefault(found.group(1).split()[-1].lower(), f"{found.group(1)}{found.group(2) or ''}")
         for word, place in sources.items():
-            spot = "" if " " in place else " on the front edge of the surface, closest to the camera with nobody in front of it"
-            note = (f"The {place} stays in clear view{spot}, in the same spot, never hidden behind a person or out of "
-                    "frame; what is still inside it is not counted above.")
+            spot = "" if " " in place else ", closest to the camera"
+            note = f"The {place} stays in clear view{spot}, unmoved; its contents are not counted above."
             if not _is_placed(end.group(1), word):
                 text = f"{text.rstrip()} {note}"
             if not _is_placed(start.group(0), word):
@@ -189,7 +189,7 @@ _NUMBERS = {w: i + 1 for i, w in enumerate("one two three four five six seven ei
 _COUNT_RE = re.compile(r"\bexactly (\d+|" + "|".join(_NUMBERS) + r") (?:[a-z-]+ )*?([a-z]+s)\b", re.I)
 _KEPT_RE = re.compile(r"\bThe ([a-z][a-z -]*?)(?: (?:at|on|in|beside|near|by|under|behind) [^;.]*?)? stays in clear view", re.I)
 _LEFT_IN_RE = re.compile(r"\bexactly \w+(?: more)? in (?:(?:a|an|the) )?(?:[a-z-]+ )*?([a-z]+)\b"
-                         r"(?=\s+(?:at|on|in|beside|near|by|under|behind)\b|[,;.]|$)"
+                         r"(?=\s+(?:at|on|in|beside|near|by|under|behind|front|rear|back|left|right)\b|[,;.]|$)"
                          r"|\b([a-z]+) empty\b", re.I)
 
 
