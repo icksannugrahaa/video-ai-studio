@@ -460,6 +460,62 @@ def test_continuing_shot_starts_in_the_state_the_previous_shot_ends_in():
     assert "START: a bowl." in scenes[2]["visual_prompt"]  # a new location does not inherit anything
 
 
+def test_place_objects_are_taken_from_stays_in_every_later_shot():
+    from app.pipeline import planner
+    # Project 11: the basket was only named in ACTION, vanished mid clip and was missing from the next seed frame.
+    scenes = [{"visual_prompt": "Table. START: one apple, no other apples. ACTION: lifts a second apple from a basket "
+                                "at the right edge, sets it down. END: two apples, no other apples.", "continues": False},
+              {"visual_prompt": "Table. START: x. ACTION: lifts a third apple from the basket at the right edge, "
+                                "sets it down. END: three apples, no other apples.", "continues": True},
+              {"visual_prompt": "Table. START: x. ACTION: sweeps a palm above the apples. END: three apples.", "continues": True},
+              {"visual_prompt": "Yard. START: a ball. ACTION: kicks it. END: a ball.", "continues": False}]
+    planner.keep_sources(scenes)
+    planner.link_shots(scenes)
+    for scene in scenes[:3]:
+        start, end = scene["visual_prompt"].split("ACTION:")[0], scene["visual_prompt"].split("END:")[1]
+        assert "basket at the right edge stays in clear view" in start
+        assert "basket at the right edge stays in clear view" in end
+    assert scenes[0]["visual_prompt"].count("stays in clear view") == 2  # once in START, once in END
+    assert "basket" not in scenes[3]["visual_prompt"]  # a new location does not inherit it
+
+
+def test_source_already_stated_or_no_source_leaves_the_prompt_alone():
+    from app.pipeline import planner
+    stated = ("Table. START: one apple and a basket on the table. ACTION: takes an apple from the basket. "
+              "END: two apples and a basket on the table.")
+    plain = "She walks from the door to the table, smiling."
+    scenes = [{"visual_prompt": stated, "continues": False}, {"visual_prompt": plain, "continues": False}]
+    planner.keep_sources(scenes)
+    assert [s["visual_prompt"] for s in scenes] == [stated, plain]
+
+
+def test_end_checks_read_project_11_shots_and_compare_the_reading():
+    from app.pipeline import planner
+    scenes = [{"visual_prompt": "T. START: one apple. ACTION: Bu Mila lifts a second large red apple from a basket at the "
+                                "right edge, sets it down. END: Bu Mila hands at her sides; exactly three large red apples "
+                                "in a row, no other apples.", "continues": False},
+              {"visual_prompt": "T. START: x. ACTION: sweeps a palm. END: exactly 5 apples, no other apples.", "continues": True}]
+    planner.keep_sources(scenes)
+    first, closing = (planner.end_checks(s["visual_prompt"]) for s in scenes)
+    assert first == {"count": 3, "noun": "apples", "visible": ["basket"]}
+    assert closing == {"count": 5, "noun": "apples", "visible": ["basket"]}
+    assert '"basket":false' in planner.end_question(first) and "Count the apples" in planner.end_question(first)
+    assert planner.end_problems(first, {"count": 3, "visible": {"basket": True}}) == []
+    assert planner.end_problems(first, {"count": 2, "visible": {"basket": False}}) == ["apples 2, seharusnya 3", "basket tidak terlihat"]
+    assert planner.end_problems(first, {"count": "tiga"}) == []  # no clear mismatch, no bill
+    assert planner.end_checks("A cat jumps over a wall") is None
+    assert planner.end_checks("START: a. ACTION: b. END: the cat sleeps.") is None
+    assert planner.end_checks("END: exactly two apples and exactly one more in the basket.")["visible"] == ["basket"]
+
+
+def test_fixed_camera_shots_get_the_tripod_order():
+    from app.pipeline import planner
+    options = {"bible_style": "35mm look"}
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Table; locked-off camera. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Table; camera stays still. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK not in planner.clip_prompt(options, "Street; slow dolly. START: a. ACTION: b. END: c.")
+
+
 def test_seeded_clip_is_told_what_the_previous_shot_showed_unless_it_has_a_start():
     from app.pipeline import planner
     options = {"bible_style": "35mm look"}

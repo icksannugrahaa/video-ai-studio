@@ -74,7 +74,11 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
   equal the count in START plus what ACTION adds. The placing is done by the third second of the clip and the hands
-  then leave the objects alone until END. The first shot of a counting sequence leaves visible empty space, in the
+  then leave the objects alone until END. The named place is a story object too: put it on the same surface in clear
+  view, never behind a person or at the edge of the frame, and START and END of this shot and of every later shot in
+  the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
+  exactly two more in a basket at the table's right end, no other apples"), so it never vanishes and later shots take
+  from the same spot. The first shot of a counting sequence leaves visible empty space, in the
   frame and on the surface, for the final count (e.g. a long table with the row starting at its far left), and ACTION
   names the free spot for each new object. Vary shot sizes between sequences
   (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
@@ -122,9 +126,14 @@ BIBLE_KEYS = ("character", "world", "style")
 SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believable weight and timing in every "
               "movement, smooth motivated camera work, steady light and exposure. Faces, hands and objects keep their "
               "shape from the first to the last frame, with no morphing or flicker, and the number of objects changes "
-              "only by what the action itself adds or removes. Bringing in or placing an object happens once and is "
-              "never repeated; after it no further object enters the frame, none is stacked unless the shot says so, "
-              "and the objects stay exactly as they are until the last frame.")
+              "only by what the action itself adds or removes. Each object the action adds is brought in and placed once, "
+              "never repeated, exactly at the spot the action names; a row only grows on the side the action says. After "
+              "the last placing no further object enters the frame, none is stacked unless the shot says so, and the "
+              "objects stay exactly as they are until the last frame. Every object and container named in the shot "
+              "stays in view in its place.")
+CAMERA_LOCK = ("The camera is fixed on a tripod: no pan, tilt, zoom, push-in, pull-back or drift; the walls, windows and "
+               "table edges keep the same position in the frame from the first to the last frame.")
+_STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera stays still|fixed camera|static camera)\b", re.I)
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
                "positions. Every object in the image is there from the first frame and stays in place; "
                "nothing disappears or resets.")
@@ -132,6 +141,89 @@ SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framin
 
 _SHOT_RE = re.compile(r"\bSTART:\s*.*?\s*(?=\bACTION:)", re.S)
 _END_RE = re.compile(r"\bEND:\s*(.*)$", re.S)
+
+
+_ACTION_RE = re.compile(r"\bACTION:\s*(.*?)\s*(?=\bEND:)", re.S)
+_SOURCE_RE = re.compile(r"\b(?:lifts?|takes?|picks?|pulls?|grabs?|brings?|draws?)\b[^.;]*?\bfrom (?:a|an|the) "
+                        r"([a-z][a-z -]*?)( (?:at|on|in|beside|near|by|under|behind) [^,;.]+)?(?=[,;.]|$)", re.I)
+
+
+def _has_word(text: str, word: str) -> bool:
+    return re.search(rf"\b{re.escape(word)}\b", text, re.I) is not None
+
+
+def keep_sources(scenes: list[dict]) -> None:
+    """A place the action takes objects from must stay in START and END of its
+    sequence: left out of them, the model drops it mid clip and the next clip's
+    seed frame no longer has it."""
+    sources: dict[str, str] = {}
+    for scene in scenes:
+        if not scene.get("continues"):
+            sources = {}
+        text = scene["visual_prompt"]
+        action, start = _ACTION_RE.search(text), _SHOT_RE.search(text)
+        end = _END_RE.search(text)
+        if not (action and start and end):
+            continue
+        for found in _SOURCE_RE.finditer(action.group(1)):
+            sources.setdefault(found.group(1).split()[-1].lower(), f"{found.group(1)}{found.group(2) or ''}")
+        for word, place in sources.items():
+            note = (f"The {place} stays in clear view in the same spot, never hidden behind a person or out of frame; "
+                    "what is still inside it is not counted above.")
+            if not _has_word(end.group(1), word):
+                text = f"{text.rstrip()} {note}"
+            if not _has_word(start.group(0), word):
+                text = f"{text[:start.end()].rstrip()} {note} {text[start.end():]}"
+            start, end = _SHOT_RE.search(text), _END_RE.search(text)
+        scene["visual_prompt"] = text
+
+
+_NUMBERS = {w: i + 1 for i, w in enumerate("one two three four five six seven eight nine ten eleven twelve".split())}
+_COUNT_RE = re.compile(r"\bexactly (\d+|" + "|".join(_NUMBERS) + r") (?:[a-z-]+ )*?([a-z]+s)\b", re.I)
+_KEPT_RE = re.compile(r"\bThe ([a-z][a-z -]*?)(?: (?:at|on|in|beside|near|by|under|behind) [^;.]*?)? stays in clear view", re.I)
+_LEFT_IN_RE = re.compile(r"\bexactly \w+ more (?:[a-z-]+ )*?in (?:a|an|the) ([a-z-]+)", re.I)
+
+
+def end_checks(visual_prompt: str) -> dict | None:
+    """What a clip's last frame must show, read from the shot's END and ACTION;
+    ``None`` when the shot promises nothing that can be counted or looked for."""
+    end, action = _END_RE.search(visual_prompt), _ACTION_RE.search(visual_prompt)
+    if not end:
+        return None
+    count = _COUNT_RE.search(end.group(1))
+    words = [m.group(1).split()[-1].lower() for m in _SOURCE_RE.finditer(action.group(1))] if action else []
+    words += [m.group(1).split()[-1].lower() for m in _KEPT_RE.finditer(end.group(1))]
+    words += [m.group(1).lower() for m in _LEFT_IN_RE.finditer(end.group(1))]
+    number = count and (int(count.group(1)) if count.group(1).isdigit() else _NUMBERS[count.group(1).lower()])
+    if not (count or words):
+        return None
+    return {"count": number or None, "noun": count.group(2).lower() if count else "", "visible": list(dict.fromkeys(words))}
+
+
+def end_question(checks: dict) -> str:
+    """One frame at a time on purpose: seen live, the chat model reads a single
+    frame reliably but misreads the same objects in a grid of frames."""
+    asks, keys = ["Look at this single video frame."], []
+    if checks["count"]:
+        asks.append(f"Count the {checks['noun']} lying in view (not in a hand, not inside a container).")
+        keys.append('"count":0')
+    for word in checks["visible"]:
+        asks.append(f"Is a {word} visible anywhere, even partly?")
+    if checks["visible"]:
+        keys.append('"visible":{' + ",".join(f'"{word}":false' for word in checks["visible"]) + "}")
+    return " ".join(asks) + " Reply with JSON only: {" + ",".join(keys) + "}"
+
+
+def end_problems(checks: dict, reply: dict) -> list[str]:
+    """Differences between the promised end state and what was seen. A missing or
+    malformed answer is no finding: only a clear mismatch may bill a retake."""
+    problems = []
+    seen = reply.get("count")
+    if checks["count"] and isinstance(seen, int) and not isinstance(seen, bool) and seen != checks["count"]:
+        problems.append(f"{checks['noun']} {seen}, seharusnya {checks['count']}")
+    visible = reply.get("visible") if isinstance(reply.get("visible"), dict) else {}
+    problems += [f"{word} tidak terlihat" for word in checks["visible"] if visible.get(word) is False]
+    return problems
 
 
 def link_shots(scenes: list[dict]) -> None:
@@ -170,6 +262,8 @@ def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool 
         parts.append(SEEDED_SHOT)
     if sung:
         parts.append(sung)
+    if _STILL_CAMERA_RE.search(shot):
+        parts.append(CAMERA_LOCK)
     parts.append(SHOT_CRAFT)
     parts.append("No on-screen text, captions or watermarks.")
     return " ".join(parts)
@@ -251,6 +345,7 @@ def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
         total += seconds
     if not scenes:
         raise PlanError("storyboard kosong")
+    keep_sources(scenes)
     link_shots(scenes)
     raw_bible = data.get("bible") if isinstance(data.get("bible"), dict) else {}
     bible = {key: str(raw_bible.get(key) or "").strip()[:1200] for key in BIBLE_KEYS}

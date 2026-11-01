@@ -8,6 +8,7 @@ keys never appear in them.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import os
@@ -384,8 +385,7 @@ class Engine:
                     state["running"] += 1
                 try:
                     self._generate_one(job, project, profile, client, preset, scene, ws, seed)
-                    if seed is not None:
-                        self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
+                    self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
                 except BaseException:
                     stop.set()
                     raise
@@ -475,22 +475,53 @@ class Engine:
         except media.MediaError:
             return False
 
+    def _end_state_problems(self, profile, client, scene, clip: Path) -> list[str]:
+        """What the clip's last frame lacks compared to its END. It seeds the next
+        clip, so whatever is lost here stays lost. A failed check is no finding."""
+        checks = planner.end_checks(scene["visual_prompt"])
+        if not checks or not profile["chat_model"]:
+            return []
+        frame = clip.with_name(f"{clip.stem}_end.jpg")
+        try:
+            media.last_frame_png(clip, frame)
+            image = "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
+            reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
+                {"type": "text", "text": planner.end_question(checks)},
+                {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
+            return planner.end_problems(checks, planner.extract_json(reply))
+        except (ProviderError, media.MediaError, planner.PlanError):
+            log.warning("scene %s end state check skipped", scene["idx"])
+            return []
+        finally:
+            frame.unlink(missing_ok=True)
+
     def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed) -> None:
-        """A clip that left its seed gets one more (billed) try; the closer of the
-        two stays. The first clip is already saved, so a failed retake costs nothing."""
+        """A clip that left its seed or ends without what its shot promises gets one
+        more (billed) try; the better of the two stays and what is still wrong is
+        shown on the scene. The first clip is already saved, so a failed retake
+        costs nothing."""
         prev = self._previous_clip(project, scene, ws)
         first = next(s for s in self.repo.scenes(project["id"]) if s["id"] == scene["id"])
+
+        def flaws(clip: Path) -> tuple[list[str], float]:
+            gap = media.seam_gap(prev, clip) if seed is not None and prev else 0.0
+            return self._end_state_problems(profile, client, scene, clip), gap
+
+        left: list[str] = []
         try:
-            gap = media.seam_gap(prev, ws.path(first["clip_file"]))
-            if gap <= media.SEAM_BREAK:
+            left, gap = flaws(ws.path(first["clip_file"]))
+            if not left and gap <= media.SEAM_BREAK:
                 return
             self._progress(job, self.repo.job(job["id"])["progress"],
-                           f"Scene {scene['idx'] + 1} tidak menyambung, generate ulang sekali…")
+                           f"Scene {scene['idx'] + 1} tidak sesuai, generate ulang sekali…")
             self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
             video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
             name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
             ws.path(name).write_bytes(video.data)
-            closer = media.seam_gap(prev, ws.path(name)) < gap
+            retake_left, retake_gap = flaws(ws.path(name))
+            closer = (bool(retake_left), retake_gap) < (bool(left), gap)
+            if closer:
+                left = retake_left
         except ProviderError as exc:
             if exc.status == 499:
                 raise JobCanceled() from exc
@@ -500,7 +531,8 @@ class Engine:
             log.warning("scene %s retake unreadable", scene["idx"])
             return
         finally:
-            self.repo.update_scene(scene["id"], clip_status="done")
+            self.repo.update_scene(scene["id"], clip_status="done",
+                                   clip_error=f"Frame terakhir: {', '.join(left)}"[:300] if left else None)
         loser = first["clip_file"] if closer else name
         if closer:
             self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)

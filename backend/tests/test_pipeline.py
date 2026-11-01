@@ -424,6 +424,68 @@ def test_worse_retake_is_dropped_and_clip_is_not_retried_again(app, client, fake
     assert not (settings.projects_dir / str(pid) / "clips" / "scene_1_v1_retake.mp4").exists()
 
 
+def _basket_board(fake_client, monkeypatch):
+    shot = ("Table. START: one apple. ACTION: lifts an apple from a basket on the table, sets it down. "
+            "END: exactly two large red apples in a row and a basket on the table.")
+    board = _bible_board(False)
+    board["scenes"][0]["visual_prompt"] = shot
+    monkeypatch.setattr(fake_client, "storyboard", board)
+
+
+def _answers(fake_client, monkeypatch, *replies):
+    """The chat model's reading of each last frame, in order."""
+    plain, queue = fake_client.chat, list(replies)
+
+    def chat(self, model, messages, temperature=0.7, max_tokens=4096):
+        if isinstance(messages[-1]["content"], list):
+            fake_client.calls.append(("look", messages[-1]["content"][1]["image_url"]["url"][:22]))
+            return queue.pop(0)
+        return plain(self, model, messages, temperature, max_tokens)
+
+    monkeypatch.setattr(fake_client, "chat", chat)
+
+
+@needs_ffmpeg
+def test_clip_ending_without_what_its_shot_promises_is_retaken_even_unseeded(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    _answers(fake_client, monkeypatch, '{"count":2,"visible":{"basket":false}}', '{"count":2,"visible":{"basket":true}}')
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2
+    assert [c for c in fake_client.calls if c[0] == "look"][0][1] == "data:image/jpeg;base64,"[:22]
+    assert scene["clip_file"].endswith("_retake.mp4") and not scene["clip_error"]
+
+
+@needs_ffmpeg
+def test_end_state_still_wrong_after_the_retake_is_shown_on_the_scene(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    wrong = '{"count":2,"visible":{"basket":false}}'
+    _answers(fake_client, monkeypatch, wrong, wrong)
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2  # never a third bill
+    assert scene["clip_status"] == "done" and scene["clip_file"] == "clips/scene_0_v1.mp4"
+    assert "basket tidak terlihat" in scene["clip_error"]
+
+
+@needs_ffmpeg
+def test_unreadable_answer_bills_no_retake(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    _answers(fake_client, monkeypatch, "maaf, saya tidak bisa melihat gambar")
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 1 and not scene["clip_error"]
+
+
 @needs_ffmpeg
 def test_failed_retake_keeps_the_first_clip(app, client, fake_client, monkeypatch):
     pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
