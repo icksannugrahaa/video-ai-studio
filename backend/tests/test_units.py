@@ -552,6 +552,9 @@ def test_fixed_camera_shots_get_the_tripod_order():
     options = {"bible_style": "35mm look"}
     assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Table; locked-off camera. START: a. ACTION: b. END: c.")
     assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Table; camera stays still. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Room, medium-wide fixed 35mm shot. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Same table, medium-wide 35mm, locked-off. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK not in planner.clip_prompt(options, "Street; slow dolly. START: a fixed price tag. ACTION: b. END: c.")
     assert planner.CAMERA_LOCK not in planner.clip_prompt(options, "Street; slow dolly. START: a. ACTION: b. END: c.")
 
 

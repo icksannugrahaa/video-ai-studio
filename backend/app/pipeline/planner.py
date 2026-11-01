@@ -79,7 +79,8 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   written with its full location (never a shorthand like "right-end basket"), and START and END of this shot and of every later shot in
   the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
   exactly two more in a basket on the front right corner of the table, no other apples"), so it never vanishes and later shots take
-  from the same spot. An emptied container is written as empty, never as "exactly 0". ACTION names each object's spot
+  from the same spot. ACTION says the hand takes each object from it ("takes one apple from the basket, places it ...")
+  so nothing appears from nowhere, and END is the pose ACTION finishes in. An emptied container is written as empty, never as "exactly 0". ACTION names each object's spot
   from the object before it ("directly to the right of the third apple"), never "the next empty spot". The first shot of
   a sequence gives every person's place on screen and nobody sits or stands between the camera and the objects (e.g. one
   child at each end of the table, turned three-quarters toward the camera). The first shot of a counting sequence leaves visible empty space, in the
@@ -137,7 +138,7 @@ SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believ
               "stays in view in its place.")
 CAMERA_LOCK = ("The camera is fixed on a tripod: no pan, tilt, zoom, push-in, pull-back or drift; the walls, windows and "
                "table edges keep the same position in the frame from the first to the last frame.")
-_STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera stays still|fixed camera|static camera)\b", re.I)
+_STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera (?:stays )?still|fixed (?:camera|[\w-]* ?shot)|static camera)\b", re.I)
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
                "positions. Every object in the image is there from the first frame and stays in place; "
                "nothing disappears or resets.")
@@ -283,7 +284,7 @@ def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool 
         parts.append(SEEDED_SHOT)
     if sung:
         parts.append(sung)
-    if _STILL_CAMERA_RE.search(shot):
+    if _STILL_CAMERA_RE.search(shot.split("START:")[0]):
         parts.append(CAMERA_LOCK)
     parts.append(SHOT_CRAFT)
     parts.append("No on-screen text, captions or watermarks.")
