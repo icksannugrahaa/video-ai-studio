@@ -74,10 +74,11 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
   equal the count in START plus what ACTION adds. The placing is done by the third second of the clip and the hands
-  then leave the objects alone until END. The named place is a story object too: put it on the same surface in clear
-  view, never behind a person or at the edge of the frame, and START and END of this shot and of every later shot in
+  then leave the objects alone until END. The named place is a story object too: put it on the front edge of the same
+  surface, closest to the camera with nobody in front of it, never behind a person or at the edge of the frame, always
+  written with its full location (never a shorthand like "right-end basket"), and START and END of this shot and of every later shot in
   the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
-  exactly two more in a basket at the table's right end, no other apples"), so it never vanishes and later shots take
+  exactly two more in a basket on the front right corner of the table, no other apples"), so it never vanishes and later shots take
   from the same spot. The first shot of a counting sequence leaves visible empty space, in the
   frame and on the surface, for the final count (e.g. a long table with the row starting at its far left), and ACTION
   names the free spot for each new object. Vary shot sizes between sequences
@@ -144,12 +145,13 @@ _END_RE = re.compile(r"\bEND:\s*(.*)$", re.S)
 
 
 _ACTION_RE = re.compile(r"\bACTION:\s*(.*?)\s*(?=\bEND:)", re.S)
-_SOURCE_RE = re.compile(r"\b(?:lifts?|takes?|picks?|pulls?|grabs?|brings?|draws?)\b[^.;]*?\bfrom (?:a|an|the) "
+_SOURCE_RE = re.compile(r"\b(?:lifts?|takes?|picks?|pulls?|grabs?|brings?|draws?)\b[^.;]*?\bfrom (?:(?:a|an|the) )?"
                         r"([a-z][a-z -]*?)( (?:at|on|in|beside|near|by|under|behind) [^,;.]+)?(?=[,;.]|$)", re.I)
 
 
-def _has_word(text: str, word: str) -> bool:
-    return re.search(rf"\b{re.escape(word)}\b", text, re.I) is not None
+def _is_placed(text: str, word: str) -> bool:
+    """Whether the text says where the object is, not only that it exists."""
+    return re.search(rf"\b{re.escape(word)}\b[^.;,]*\b(?:on|at|beside|near|under|behind)\b", text, re.I) is not None
 
 
 def keep_sources(scenes: list[dict]) -> None:
@@ -168,11 +170,12 @@ def keep_sources(scenes: list[dict]) -> None:
         for found in _SOURCE_RE.finditer(action.group(1)):
             sources.setdefault(found.group(1).split()[-1].lower(), f"{found.group(1)}{found.group(2) or ''}")
         for word, place in sources.items():
-            note = (f"The {place} stays in clear view in the same spot, never hidden behind a person or out of frame; "
-                    "what is still inside it is not counted above.")
-            if not _has_word(end.group(1), word):
+            spot = "" if " " in place else " on the front edge of the surface, closest to the camera with nobody in front of it"
+            note = (f"The {place} stays in clear view{spot}, in the same spot, never hidden behind a person or out of "
+                    "frame; what is still inside it is not counted above.")
+            if not _is_placed(end.group(1), word):
                 text = f"{text.rstrip()} {note}"
-            if not _has_word(start.group(0), word):
+            if not _is_placed(start.group(0), word):
                 text = f"{text[:start.end()].rstrip()} {note} {text[start.end():]}"
             start, end = _SHOT_RE.search(text), _END_RE.search(text)
         scene["visual_prompt"] = text
@@ -181,7 +184,9 @@ def keep_sources(scenes: list[dict]) -> None:
 _NUMBERS = {w: i + 1 for i, w in enumerate("one two three four five six seven eight nine ten eleven twelve".split())}
 _COUNT_RE = re.compile(r"\bexactly (\d+|" + "|".join(_NUMBERS) + r") (?:[a-z-]+ )*?([a-z]+s)\b", re.I)
 _KEPT_RE = re.compile(r"\bThe ([a-z][a-z -]*?)(?: (?:at|on|in|beside|near|by|under|behind) [^;.]*?)? stays in clear view", re.I)
-_LEFT_IN_RE = re.compile(r"\bexactly \w+ more (?:[a-z-]+ )*?in (?:a|an|the) ([a-z-]+)", re.I)
+_LEFT_IN_RE = re.compile(r"\bexactly \w+(?: more)? in (?:(?:a|an|the) )?(?:[a-z-]+ )*?([a-z]+)\b"
+                         r"(?=\s+(?:at|on|in|beside|near|by|under|behind)\b|[,;.]|$)"
+                         r"|\b([a-z]+) empty\b", re.I)
 
 
 def end_checks(visual_prompt: str) -> dict | None:
@@ -193,7 +198,7 @@ def end_checks(visual_prompt: str) -> dict | None:
     count = _COUNT_RE.search(end.group(1))
     words = [m.group(1).split()[-1].lower() for m in _SOURCE_RE.finditer(action.group(1))] if action else []
     words += [m.group(1).split()[-1].lower() for m in _KEPT_RE.finditer(end.group(1))]
-    words += [m.group(1).lower() for m in _LEFT_IN_RE.finditer(end.group(1))]
+    words += [(m.group(1) or m.group(2)).lower() for m in _LEFT_IN_RE.finditer(end.group(1))]
     number = count and (int(count.group(1)) if count.group(1).isdigit() else _NUMBERS[count.group(1).lower()])
     if not (count or words):
         return None

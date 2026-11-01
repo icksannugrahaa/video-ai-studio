@@ -479,6 +479,24 @@ def test_place_objects_are_taken_from_stays_in_every_later_shot():
     assert "basket" not in scenes[3]["visual_prompt"]  # a new location does not inherit it
 
 
+def test_container_named_without_a_place_gets_one():
+    from app.pipeline import planner
+    scenes = [{"visual_prompt": "Table. START: one apple and exactly four in the right-end basket, no other apples. ACTION: "
+                                "takes one apple from basket, places it. END: exactly two apples and exactly three in "
+                                "right-end basket, no other apples.", "continues": False},
+              {"visual_prompt": "Table. START: x. ACTION: claps. END: exactly two apples and the right-end basket empty.",
+               "continues": True}]
+    planner.keep_sources(scenes)
+    planner.link_shots(scenes)
+    for scene in scenes:
+        start, end = scene["visual_prompt"].split("ACTION:")[0], scene["visual_prompt"].split("END:")[1]
+        assert "closest to the camera" in start and "closest to the camera" in end
+    once = [s["visual_prompt"] for s in scenes]
+    planner.keep_sources(scenes)
+    assert [s["visual_prompt"] for s in scenes] == once  # a replan of an unchanged shot does not regenerate it
+    assert planner.end_checks(scenes[1]["visual_prompt"])["visible"] == ["basket"]
+
+
 def test_source_already_stated_or_no_source_leaves_the_prompt_alone():
     from app.pipeline import planner
     stated = ("Table. START: one apple and a basket on the table. ACTION: takes an apple from the basket. "
@@ -506,6 +524,16 @@ def test_end_checks_read_project_11_shots_and_compare_the_reading():
     assert planner.end_checks("A cat jumps over a wall") is None
     assert planner.end_checks("START: a. ACTION: b. END: the cat sleeps.") is None
     assert planner.end_checks("END: exactly two apples and exactly one more in the basket.")["visible"] == ["basket"]
+
+
+def test_end_checks_find_the_container_however_the_planner_words_it():
+    from app.pipeline import planner
+    bare = ("START: one. ACTION: Bu Guru takes one apple from basket, places it right of the first. "
+            "END: exactly three apples in row and exactly two in right-end basket, no other apples.")
+    empty = "START: five. ACTION: she claps. END: exactly five apples in row and the right-end basket empty, no other apples."
+    assert planner.end_checks(bare) == {"count": 3, "noun": "apples", "visible": ["basket"]}
+    assert planner.end_checks(empty) == {"count": 5, "noun": "apples", "visible": ["basket"]}
+    assert planner.end_checks("START: a. ACTION: b. END: exactly three apples in row, no other apples.")["visible"] == []
 
 
 def test_fixed_camera_shots_get_the_tripod_order():
