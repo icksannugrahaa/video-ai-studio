@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141821" />
+      <stop offset="100%" stop-color="#0D1017" />
+    </linearGradient>
+    <linearGradient id="headGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#4ADE80" />
+      <stop offset="100%" stop-color="#22C55E" />
+    </linearGradient>
+    <linearGradient id="greenGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="50%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <linearGradient id="greenGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4ADE80" />
+      <stop offset="60%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    <linearGradient id="greenGrad3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#10B981" />
+    </linearGradient>
+    <linearGradient id="silverGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F8FAFC" />
+      <stop offset="50%" stop-color="#CBD5E1" />
+      <stop offset="100%" stop-color="#64748B" />
+    </linearGradient>
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000000" flood-opacity="0.4" />
+    </filter>
+  </defs>
+
+  <!-- Ganti fill="transparent" menjadi fill="url(#bgGrad)" jika ingin latar belakang gelap menyatu -->
+  <rect width="800" height="500" rx="20" fill="transparent" />
+
+  <g filter="url(#dropShadow)" transform="translate(160, -25) scale(0.8)">
+    <!-- Antena Android -->
+    <line x1="235" y1="145" x2="212" y2="105" stroke="url(#headGrad)" stroke-width="12" stroke-linecap="round" />
+    <line x1="365" y1="145" x2="388" y2="105" stroke="url(#headGrad)" stroke-width="12" stroke-linecap="round" />
+    
+    <!-- Kepala Android -->
+    <path d="M 190 230 A 110 105 0 0 1 410 230 Z" fill="url(#headGrad)" />
+    <circle cx="250" cy="188" r="11" fill="#12161F" />
+    <circle cx="350" cy="188" r="11" fill="#12161F" />
+
+    <!-- Bagian Atas Kiri Huruf S (Geometris) -->
+    <path d="M 190 246 L 265 246 L 306 330 A 14 14 0 0 1 286 348 L 190 296 Z" fill="url(#greenGrad1)" />
+    <path d="M 190 246 L 265 246 L 245 296 L 190 296 Z" fill="#4ADE80" fill-opacity="0.25" />
+
+    <!-- Aksen Silver Kanan Atas -->
+    <path d="M 358 246 L 410 246 L 410 298 C 380 298 358 276 358 246 Z" fill="url(#silverGrad)" />
+
+    <!-- Bagian Tengah-Kanan Huruf S (Geometris) -->
+    <path d="M 318 292 L 402 344 A 18 18 0 0 1 410 359 L 410 412 C 410 436 392 465 355 488 L 352 430 L 300 310 A 14 14 0 0 1 318 292 Z" fill="url(#greenGrad2)" />
+    <path d="M 318 292 L 402 344 A 18 18 0 0 1 410 359 L 335 390 L 300 310 A 14 14 0 0 1 318 292 Z" fill="#6EE7B7" fill-opacity="0.22" />
+
+    <!-- Aksen Silver Kiri Bawah -->
+    <path d="M 190 362 C 228 362 244 392 244 422 L 190 478 Z" fill="url(#silverGrad)" />
+
+    <!-- Bagian Dasar Bawah Huruf S -->
+    <path d="M 248 430 L 332 430 C 344 430 348 440 348 460 C 348 478 340 488 326 488 L 196 488 Z" fill="url(#greenGrad3)" />
+  </g>
+</svg>

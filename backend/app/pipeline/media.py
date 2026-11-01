@@ -8,6 +8,7 @@ tracks are PCM 48 kHz so timelines stay sample-exact.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -43,7 +44,7 @@ def probe(path: Path) -> dict:
     if not ffprobe:
         raise MediaError("ffprobe tidak ditemukan")
     proc = subprocess.run(
-        [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type",
+        [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type,r_frame_rate",
          "-of", "json", str(path)],
         capture_output=True, timeout=60,
     )
@@ -56,26 +57,149 @@ def duration(path: Path) -> float:
     return float((probe(path).get("format") or {}).get("duration") or 0.0)
 
 
+def video_fps(path: Path) -> float:
+    """Frame rate of the first video stream (0 when unknown)."""
+    for stream in probe(path).get("streams") or []:
+        if stream.get("codec_type") == "video":
+            num, _, den = str(stream.get("r_frame_rate") or "0/1").partition("/")
+            try:
+                return float(num) / float(den or 1)
+            except (ValueError, ZeroDivisionError):
+                return 0.0
+    return 0.0
+
+
+def audible_end(path: Path) -> float:
+    """Where the sound really ends: generated songs often close with seconds of
+    silence that must not become a frozen end of the video."""
+    length = duration(path)
+    proc = subprocess.run([ffmpeg_bin(), "-hide_banner", "-i", str(path), "-af", "silencedetect=n=-40dB:d=0.5",
+                           "-f", "null", "-"], capture_output=True, timeout=_TIMEOUT)
+    starts = re.findall(r"silence_start: ([\d.]+)", proc.stderr.decode("utf-8", "replace"))
+    ends = re.findall(r"silence_end: ([\d.]+)", proc.stderr.decode("utf-8", "replace"))
+    if starts and (len(ends) < len(starts) or float(ends[-1]) >= length - 0.1):
+        return round(float(starts[-1]), 3)
+    return round(length, 3)
+
+
 def has_audio(path: Path) -> bool:
     return any(s.get("codec_type") == "audio" for s in probe(path).get("streams") or [])
 
 
 def last_frame_png(video: Path, out_png: Path) -> Path:
-    """Grab (approximately) the last frame — continuity seed for the next clip."""
-    _run(["-sseof", "-0.3", "-i", video, "-frames:v", "1", "-q:v", "2", out_png])
+    """Grab the very last frame — continuity seed for the next clip. Decoding
+    the tail and keeping the final image matters: a frame from 0.3 s earlier
+    made the next clip jump back at every "continues" cut."""
+    _run(["-sseof", "-0.5", "-i", video, "-update", "1", "-q:v", "2", out_png])
     if not Path(out_png).exists():
         raise MediaError("gagal mengambil frame terakhir")
     return Path(out_png)
 
 
-def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: int, seconds: float,
-                   keep_audio: bool, preset: str = "veryfast") -> Path:
-    """Scale/crop ``src`` to fill ``width``×``height``, hold the last frame up
-    to ``seconds`` and always emit a stereo AAC track (silent if needed)."""
+_SEAM_SIZE = (64, 36)  # tiny grey frames: enough to tell poses apart, cheap to compare in Python
+
+
+def _grey_frames(path: Path, first_only: bool = False) -> list[bytes]:
+    w, h = _SEAM_SIZE
+    args = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(path),
+            *(["-frames:v", "1"] if first_only else []),
+            "-vf", f"scale={w}:{h},format=gray", "-f", "rawvideo", "-"]
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError("ffmpeg timeout") from exc
+    if proc.returncode != 0:
+        raise MediaError("gagal membaca frame clip")
+    size = w * h
+    return [proc.stdout[i:i + size] for i in range(0, len(proc.stdout) - size + 1, size)]
+
+
+def seam_frames(prev: Path, nxt: Path, *, window: float = 0.6, fps: float = 24.0) -> int | None:
+    """Frames of ``prev`` to keep so it ends on the pose ``nxt`` starts from.
+
+    A "continues" clip is seeded with a frame of the previous one, but not
+    always its very last frame (older seeds were taken 0.3 s early, and some
+    models re-render the seed slightly). Cutting the previous clip at the
+    best-matching frame removes the backward jump at the cut. ``None`` when the
+    last frame already matches best (nothing to cut)."""
+    frames = _grey_frames(prev)
+    first = _grey_frames(nxt, first_only=True)
+    if len(frames) < 3 or not first:
+        return None
+
+    def diff(a: bytes, b: bytes) -> float:
+        return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+    tail = max(2, int(window * fps))
+    scores = [(diff(frames[k], first[0]), -k) for k in range(max(0, len(frames) - tail), len(frames))]
+    best, k = min(scores)  # ties → the latest frame (cut as little as possible)
+    k, last = -k, scores[-1][0]
+    if k == len(frames) - 1 or best > 0.7 * last:  # no clearly better match than the real end
+        return None
+    return k + 1
+
+
+SEAM_BREAK = 15.0  # worst block's mean grey difference (0-255); good seeded seams measure 10-11, broken ones 20+
+
+
+def seam_gap(prev: Path, nxt: Path) -> float:
+    """How far a seeded clip's first frame is from the end of the previous clip.
+    Compared per block: a small object changing barely moves the whole-frame mean."""
+    frames, first = _grey_frames(prev), _grey_frames(nxt, first_only=True)
+    if not frames or not first:
+        return 0.0
+    w, h = _SEAM_SIZE
+    cols, rows = 8, 4
+    totals = [0] * (cols * rows)
+    for i, (x, y) in enumerate(zip(frames[-1], first[0])):
+        totals[(i % w) * cols // w + (i // w) * rows // h * cols] += abs(x - y)
+    return max(totals) / (w * h / (cols * rows))
+
+
+def seam_broken(prev: Path, nxt: Path) -> bool:
+    """Whether a seeded clip visibly left its seed (an apple gone, an arm moved)."""
+    return seam_gap(prev, nxt) > SEAM_BREAK
+
+
+def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float, seconds: float,
+                   keep_audio: bool, preset: str = "veryfast", lead: float = 0.0,
+                   keep_frames: int | None = None, retime: float | None = None) -> Path:
+    """Scale/crop ``src`` to fill ``width``×``height``, pad it to ``seconds``
+    and always emit a stereo AAC track (silent if needed).
+
+    A clip shorter than ``seconds`` is padded by holding its first frame for up
+    to ``lead`` seconds (the part hidden under the incoming crossfade), and only
+    the rest by holding its last frame — a frozen tail before a "continues" cut
+    shows as a stall.
+
+    ``keep_frames`` (from :func:`seam_frames`) drops the frames after the seam
+    and slows the rest down a little so the clip keeps its length. ``retime``
+    plays the clip over that many seconds, so it fills a sung section without
+    a frozen tail (kept to a speed change that still looks natural); a section
+    too long for that plays the clip forward and back instead of freezing."""
     src_seconds = duration(src)
-    pad = max(0.0, seconds - src_seconds) + 0.1
-    vf = (f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
-          f"setsar=1,fps={fps},tpad=stop_mode=clone:stop_duration={pad:.3f}")
+    stretch = ""
+    if keep_frames:
+        kept = keep_frames / (video_fps(src) or 24.0)
+        factor = src_seconds / kept if kept else 1.0
+        if 1.0 < factor <= 1.15:  # ≤ 15 % slower is not noticeable; more would be
+            stretch = f"trim=end_frame={keep_frames},setpts=(PTS-STARTPTS)*{factor:.5f},"
+    bounce = ""
+    if retime and src_seconds and 0.9 <= retime / src_seconds <= 1.8:
+        stretch = f"setpts=(PTS-STARTPTS)*{retime / src_seconds:.5f},"
+        src_seconds = retime
+    elif retime and src_seconds and retime / src_seconds > 1.8:
+        factor = min(1.8, max(1.0, retime / (2 * src_seconds)))
+        # After scaling: reverse buffers every frame, keep that small on a phone.
+        bounce = (f"split[fwd][back];[back]reverse[rev];[fwd][rev]concat=n=2:v=1:a=0,"
+                  f"setpts=(PTS-STARTPTS)*{factor:.5f},fps={fps:g},")
+        src_seconds = 2 * src_seconds * factor
+    missing = max(0.0, seconds - src_seconds)
+    head = min(missing, max(0.0, lead))
+    pad = missing - head + 0.1
+    tpad = f"tpad=start_mode=clone:start_duration={head:.3f}:" if head > 0 else "tpad="
+    vf = (f"{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+          f"setsar=1,fps={fps:g},{bounce}{tpad}stop_mode=clone:stop_duration={pad:.3f}")
     args: list = ["-i", src]
     if keep_audio and has_audio(src):
         audio = ["-map", "0:a:0", "-af", f"aresample={AUDIO_RATE},apad"]

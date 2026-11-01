@@ -31,6 +31,7 @@ CLIP_ATTEMPTS = 3
 # instant retries just fail the same way (seen live: CodeBuddy 429 bursts).
 CLIP_RETRY_DELAYS = (30, 90)
 NARRATION_TAIL = 0.4  # seconds of breathing room after the last sentence
+SEAM_DISSOLVE = 0.2  # seconds, continuing shots
 
 
 def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[list[dict]]:
@@ -51,20 +52,33 @@ def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[li
     return chains
 
 
-def scene_transitions(scenes: list[dict], lengths: list[float], options: dict) -> list[float]:
+def render_fps(clips: list[Path], default: int) -> float:
+    """Keep the clips' own frame rate when they share one at or below the
+    configured rate: converting 24 fps clips to 30 fps repeats every 4th frame,
+    which shows as a steady stutter."""
+    rates = {round(media.video_fps(c), 3) for c in clips if c.exists()}
+    rate = rates.pop() if len(rates) == 1 else 0.0
+    return rate if 0 < rate <= default else float(default)
+
+
+def scene_transitions(scenes: list[dict], lengths: list[float], options: dict,
+                      broken: frozenset | set = frozenset()) -> list[float]:
     """Crossfade seconds after each scene (last is 0). A shot that continues the
-    previous one already starts from its last frame, so it gets a hard cut;
-    fades are capped at a third of the shorter neighbouring scene."""
+    previous one starts from its last frame, but models re-render that frame, so
+    it gets just a short dissolve to hide the twitch; a full fade when the seam
+    after scene ``i`` is in ``broken`` (the clip left its seed). Fades are capped
+    at a third of the shorter neighbouring scene."""
     try:
         wanted = max(0.0, min(1.5, float(options.get("transition", 0.5) or 0)))
     except (TypeError, ValueError):
         wanted = 0.5
     fades = []
     for i in range(len(scenes)):
-        if i == len(scenes) - 1 or not wanted or scenes[i + 1].get("continues"):
+        if i == len(scenes) - 1 or not wanted:
             fades.append(0.0)
-        else:
-            fades.append(round(min(wanted, lengths[i] / 3, lengths[i + 1] / 3), 3))
+            continue
+        fade = min(wanted, SEAM_DISSOLVE) if scenes[i + 1].get("continues") and i not in broken else wanted
+        fades.append(round(min(fade, lengths[i] / 3, lengths[i + 1] / 3), 3))
     return fades
 
 
@@ -72,7 +86,10 @@ def _bible_options(board: dict) -> dict:
     """Project option updates for a planner result's bible (empty fields skipped,
     so an edit that drops the bible keeps the stored one)."""
     bible = board.get("bible") or {}
-    return {f"bible_{key}": bible[key] for key in planner.BIBLE_KEYS if bible.get(key)}
+    options = {f"bible_{key}": bible[key] for key in planner.BIBLE_KEYS if bible.get(key)}
+    if board.get("concept"):  # what the video promises: edits keep building on it
+        options["concept"] = board["concept"]
+    return options
 
 
 class JobCanceled(Exception):
@@ -140,21 +157,42 @@ class Engine:
         project, profile, client, preset = self._context(job)
         if not profile["chat_model"]:
             raise JobFailed("profil belum memilih model chat")
-        self._progress(job, 0.1, "Menyusun storyboard…")
+        project = self._song_first(job, project, profile, client)
+        self._progress(job, 0.3, "Menyusun storyboard…")
+        ws = Workspace(self.settings.projects_dir, project["id"])
+        music = self._music_path(project, ws) if self._is_song(project) else None
+        lyrics = project["options"].get("lyrics") or "" if self._is_song(project) else ""
         board = planner.plan_storyboard(
             client, profile["chat_model"], prompt=project["prompt"], language=project["language"],
             clip_seconds=int(profile["clip_seconds"]), target_seconds=int(project["target_seconds"]),
-            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"],
+            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
+            lyrics=lyrics, song_seconds=media.audible_end(music) if music else None,
         )
         diff = self.repo.replace_scenes(project["id"], board["scenes"])
         update = {"status": "planned"}
         if board["title"] and not project["title"]:
             update["title"] = board["title"]
         update["options"] = _bible_options(board)
-        if board.get("music_prompt"):
+        if board.get("music_prompt") and not lyrics:  # a song prompt carries the lyrics: keep it
             update["options"]["music_prompt"] = board["music_prompt"]
         self.repo.update_project(job["user_id"], project["id"], update)
         return {"scenes": len(board["scenes"]), **diff}
+
+    def _song_first(self, job, project, profile, client) -> dict:
+        """Song mode: the scenes follow the lyrics, so missing lyrics come first. If
+        they cannot be written the storyboard is still planned from the idea and
+        the button (or the render) writes them later."""
+        if not self._is_song(project) or (project["options"].get("lyrics") or "").strip():
+            return project
+        self._progress(job, 0.1, "Menulis lirik & prompt musik…")
+        try:
+            song = planner.song_from_idea(client, profile["chat_model"], idea=project["prompt"],
+                                          language=project["language"], seconds=int(project["target_seconds"]))
+        except (ProviderError, planner.PlanError) as exc:
+            log.warning("project %s lyrics not written: %s", project["id"], type(exc).__name__)
+            return project
+        self.repo.update_project(job["user_id"], project["id"], {"options": song})
+        return self.repo.project(job["user_id"], project["id"]) or project
 
     def run_music_prompt(self, job: dict) -> dict:
         project, profile, client, _preset = self._context(job)
@@ -212,6 +250,7 @@ class Engine:
             return {**diff, **self._render(job, project, profile, client, preset, start=0.1)}
         opts = project["options"]
         current = {"title": project["title"],
+                   "concept": opts.get("concept") or {},
                    "bible": {key: opts.get(f"bible_{key}") or "" for key in planner.BIBLE_KEYS},
                    "scenes": [{"visual_prompt": s["visual_prompt"], "continues": s["continues"],
                                "narration": s["narration"], "duration": s["duration"]}
@@ -220,7 +259,7 @@ class Engine:
         board = planner.edit_storyboard(
             client, profile["chat_model"], storyboard=current, instruction=instruction,
             language=project["language"], clip_seconds=int(profile["clip_seconds"]),
-            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"],
+            limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
         )
         diff = self.repo.replace_scenes(project["id"], board["scenes"])
         options = _bible_options(board)
@@ -253,6 +292,7 @@ class Engine:
         ws = Workspace(self.settings.projects_dir, project["id"])
         self.repo.update_project(job["user_id"], project["id"], {"status": "rendering"})
         try:
+            project = self._ensure_song(job, project, profile, client, scenes)
             self._generate_clips(job, project, profile, client, preset, scenes, ws, start, 0.65)
             scenes = self.repo.scenes(project["id"])
             if not self._is_song(project):  # song mode: the lyrics are the voice, no TTS
@@ -268,6 +308,30 @@ class Engine:
         self.repo.update_project(job["user_id"], project["id"], {"status": "done"})
         return result
 
+    def _ensure_song(self, job, project, profile, client, scenes) -> dict:
+        """Song mode: fill in missing lyrics / music prompt before any clip is billed,
+        since each clip is directed by the lines sung during it. Lyrics the user
+        already has are kept."""
+        opts = project["options"]
+        if not self._is_song(project):
+            return project
+        lyrics, prompt = (opts.get("lyrics") or "").strip(), (opts.get("music_prompt") or "").strip()
+        if lyrics and prompt:
+            return project
+        if lyrics:
+            total = int(round(sum(float(s["duration"]) for s in scenes)))
+            update = {"music_prompt": planner.song_prompt(
+                style=f'Song for the video "{project["title"] or project["prompt"][:80]}"', vocal="",
+                lyrics=lyrics, total=total)}
+        else:
+            if not profile["chat_model"]:
+                raise JobFailed("profil belum memilih model chat (dibutuhkan untuk membuat lirik)")
+            self._progress(job, self.repo.job(job["id"])["progress"], "Menulis lirik & prompt musik…")
+            update = planner.song_plan(client, profile["chat_model"], title=project["title"], scenes=scenes,
+                                       language=project["language"])
+        self.repo.update_project(job["user_id"], project["id"], {"options": update})
+        return self.repo.project(job["user_id"], project["id"]) or project
+
     # clips ------------------------------------------------------------
     def _generate_clips(self, job, project, profile, client, preset, scenes, ws, p0, p1) -> None:
         todo_ids = {s["id"] for s in scenes if not (s["clip_status"] == "done" and s["clip_version"] == s["version"]
@@ -282,23 +346,33 @@ class Engine:
         chains = clip_chains(scenes, continuity=continuity, bible=bible)
         # Chains are independent and run side by side; scenes inside a chain wait
         # for the previous clip (its last frame seeds the next one).
-        work_chains = [[s for s in chain if s["id"] in todo_ids] for chain in chains]
-        work_chains = [c for c in work_chains if c]
-        total = len(todo_ids)
-        state = {"done": 0, "running": 0}
+        work_chains = [c for c in chains if any(s["id"] in todo_ids for s in c)]
+        state = {"done": 0, "running": 0, "total": len(todo_ids)}
         lock = threading.Lock()
         stop = threading.Event()  # first failure: no chain starts a new (billed) clip
 
         def report(note: str) -> None:
             with lock:
-                n, running = state["done"], state["running"]
+                n, running, total = state["done"], state["running"], state["total"]
             extra = f" · {running} berjalan paralel" if running > 1 else ""
             self._progress(job, p0 + (p1 - p0) * n / total, f"{note}{extra}")
 
         def run_chain(chain: list[dict]) -> None:
+            remade = False  # the previous clip of this chain changed in this job
             for scene in chain:
                 if stop.is_set():
                     return
+                if scene["id"] not in todo_ids:
+                    if not remade or not self._seed_went_stale(project, scene, ws):
+                        remade = False
+                        continue
+                    # Its seed was replaced and it no longer connects. Bumping the
+                    # version first lets a resumed job finish the remake.
+                    scene = {**scene, "version": scene["version"] + 1}
+                    self.repo.update_scene(scene["id"], version=scene["version"])
+                    with lock:
+                        state["total"] += 1
+                remade = True
                 seed = None
                 if continuity and scene["idx"] > 0 and (scene.get("continues") or not bible):
                     prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
@@ -310,6 +384,8 @@ class Engine:
                     state["running"] += 1
                 try:
                     self._generate_one(job, project, profile, client, preset, scene, ws, seed)
+                    if seed is not None:
+                        self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
                 except BaseException:
                     stop.set()
                     raise
@@ -318,11 +394,14 @@ class Engine:
                         state["running"] -= 1
                 with lock:
                     state["done"] += 1
-                    n = state["done"]
+                    n, total = state["done"], state["total"]
                 report(f"Clip {n}/{total} selesai")
 
-        lanes = max(1, min(self.settings.clip_concurrency, len(work_chains)))
-        report(f"Generate {total} clip" + (f" ({lanes} jalur paralel)" if lanes > 1 else "") + "…")
+        # One clip at a time unless the project opts in: the phone server cannot
+        # take several video jobs at once. SAV_CLIP_CONCURRENCY caps the opt-in.
+        limit = self.settings.clip_concurrency if project["options"].get("parallel_clips") else 1
+        lanes = max(1, min(limit, len(work_chains)))
+        report(f"Generate {len(todo_ids)} clip" + (f" ({lanes} jalur paralel)" if lanes > 1 else "") + "…")
         if lanes == 1:
             for chain in work_chains:
                 run_chain(chain)
@@ -343,13 +422,7 @@ class Engine:
         started = time.monotonic()  # generation time shown per clip (includes retries/back-off)
         for attempt in range(1, CLIP_ATTEMPTS + 1):
             try:
-                video = client.generate_video(
-                    profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"]),
-                    seconds=int(round(scene["duration"])),
-                    aspect_ratio=preset["model_aspect"], image_png=seed,
-                    enable_audio=bool(project["options"].get("keep_clip_audio")),
-                    should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
-                )
+                video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
                 name = f"clips/scene_{scene['idx']}_v{scene['version']}.{video.ext}"
                 ws.path(name).write_bytes(video.data)
                 media.duration(ws.path(name))  # validate it is a real video
@@ -374,6 +447,132 @@ class Engine:
                 self._sleep(job, delay)
         self.repo.update_scene(scene["id"], clip_status="failed", clip_error=(last_error or "gagal")[:300])
         raise JobFailed(f"Scene {scene['idx'] + 1} gagal: {last_error}")
+
+    def _request_clip(self, job, project, profile, client, preset, scene, ws, seed):
+        return client.generate_video(
+            profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
+                                                        sung=self._sung_during(project, scene, ws),
+                                                        seeded=seed is not None,
+                                                        previous=self._previous_shot(project, scene)),
+            seconds=self._clip_seconds(project, profile, scene, ws),
+            aspect_ratio=preset["model_aspect"], image_png=seed,
+            enable_audio=bool(project["options"].get("keep_clip_audio")),
+            should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
+        )
+
+    def _previous_shot(self, project: dict, scene: dict) -> str:
+        prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
+        return prev["visual_prompt"] if prev else ""
+
+    def _previous_clip(self, project: dict, scene: dict, ws) -> Path | None:
+        prev = next((s for s in self.repo.scenes(project["id"]) if s["idx"] == scene["idx"] - 1), None)
+        return ws.path(prev["clip_file"]) if prev and prev.get("clip_file") else None
+
+    def _seed_went_stale(self, project: dict, scene: dict, ws) -> bool:
+        prev = self._previous_clip(project, scene, ws)
+        try:
+            return bool(prev) and media.seam_gap(prev, ws.path(scene["clip_file"])) > media.SEAM_BREAK
+        except media.MediaError:
+            return False
+
+    def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed) -> None:
+        """A clip that left its seed gets one more (billed) try; the closer of the
+        two stays. The first clip is already saved, so a failed retake costs nothing."""
+        prev = self._previous_clip(project, scene, ws)
+        first = next(s for s in self.repo.scenes(project["id"]) if s["id"] == scene["id"])
+        try:
+            gap = media.seam_gap(prev, ws.path(first["clip_file"]))
+            if gap <= media.SEAM_BREAK:
+                return
+            self._progress(job, self.repo.job(job["id"])["progress"],
+                           f"Scene {scene['idx'] + 1} tidak menyambung, generate ulang sekali…")
+            self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
+            video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
+            name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
+            ws.path(name).write_bytes(video.data)
+            closer = media.seam_gap(prev, ws.path(name)) < gap
+        except ProviderError as exc:
+            if exc.status == 499:
+                raise JobCanceled() from exc
+            log.warning("scene %s retake failed", scene["idx"])
+            return
+        except media.MediaError:
+            log.warning("scene %s retake unreadable", scene["idx"])
+            return
+        finally:
+            self.repo.update_scene(scene["id"], clip_status="done")
+        loser = first["clip_file"] if closer else name
+        if closer:
+            self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)
+        ws.path(loser).unlink(missing_ok=True)
+
+    def _seam(self, project: dict, scenes: list[dict], i: int, ws) -> int | None:
+        """Frames of clip ``i`` to keep so it ends where the next, seeded clip
+        starts (see :func:`media.seam_frames`); ``None`` = keep everything."""
+        if i + 1 >= len(scenes) or not project["options"].get("continuity"):
+            return None
+        nxt = scenes[i + 1]
+        if not (nxt.get("continues") or not planner.has_bible(project["options"])):
+            return None  # not seeded from this clip
+        if nxt["idx"] != scenes[i]["idx"] + 1 or not nxt.get("clip_file"):
+            return None  # partial preview with a gap: the clips are not neighbours
+        try:
+            return media.seam_frames(ws.path(scenes[i]["clip_file"]), ws.path(nxt["clip_file"]),
+                                     fps=media.video_fps(ws.path(scenes[i]["clip_file"])) or 24.0)
+        except media.MediaError:
+            return None
+
+    def _broken_seams(self, project: dict, scenes: list[dict], ws) -> set[int]:
+        """Seams after scene ``i`` where the seeded next clip does not match."""
+        broken = set()
+        for i in range(len(scenes) - 1):
+            nxt = scenes[i + 1]
+            if nxt.get("continues") and nxt["idx"] == scenes[i]["idx"] + 1 and nxt.get("clip_file"):
+                try:
+                    if media.seam_broken(ws.path(scenes[i]["clip_file"]), ws.path(nxt["clip_file"])):
+                        broken.add(i)
+                except media.MediaError:
+                    pass
+        return broken
+
+    @staticmethod
+    def _music_path(project: dict, ws) -> Path | None:
+        opts = project["options"]
+        if opts.get("music_mode") != "none" and opts.get("music_file") and ws.path(opts["music_file"]).exists():
+            return ws.path(opts["music_file"])
+        return None
+
+    def _song_timeline(self, project: dict, scenes: list[dict], ws) -> list[float] | None:
+        """Song mode: scene lengths set by the song, so its whole length is used and
+        it never gets cut or looped. ``None`` while there is no way to tell."""
+        if not self._is_song(project):
+            return None
+        music = self._music_path(project, ws)
+        seconds = media.audible_end(music) if music else None
+        lengths = planner.song_lengths(scenes, project["options"].get("lyrics") or "", seconds)
+        if not lengths and seconds:
+            lengths = planner.fit_lengths([float(s["duration"]) for s in scenes], seconds)
+        return lengths
+
+    def _clip_seconds(self, project: dict, profile: dict, scene: dict, ws) -> int:
+        """Length to request: the part of the song this clip covers, when known."""
+        limit = int(profile["clip_seconds"])
+        ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
+        timeline = self._song_timeline(project, ordered, ws)
+        at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
+        wanted = min(timeline[at], limit) if timeline else scene["duration"]
+        return max(int(round(wanted)), planner.min_clip_seconds(limit))
+
+    def _sung_during(self, project: dict, scene: dict, ws) -> str:
+        """Song mode: the lyric lines (and tempo) heard during this scene, so the
+        clip acts out what is sung instead of a generic dance."""
+        if not self._is_song(project):
+            return ""
+        ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
+        lengths = self._song_timeline(project, ordered, ws) or [float(s["duration"]) for s in ordered]
+        at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
+        start = sum(lengths[:at])
+        return planner.sung_direction(project["options"], start, start + lengths[at])
 
     @staticmethod
     def _is_song(project: dict) -> bool:
@@ -444,7 +643,14 @@ class Engine:
         for scene in scenes:
             info = {} if song else (scene.get("narration_info") or {})
             lengths.append(round(max(float(scene["duration"]), float(info.get("duration") or 0) + NARRATION_TAIL), 2))
-        fades = scene_transitions(scenes, lengths, opts) if media.has_filter("xfade") else [0.0] * len(scenes)
+        music = self._music_path(project, ws)
+        # Song mode: the uploaded song sets the timeline, not the planned durations.
+        timeline = self._song_timeline(project, scenes, ws) if song and music else None
+        if timeline:
+            lengths = timeline
+        fades = ([0.0] * len(scenes) if not media.has_filter("xfade")
+                 else scene_transitions(scenes, lengths, opts, self._broken_seams(project, scenes, ws)))
+        fps = render_fps([ws.path(s["clip_file"]) for s in scenes if s.get("clip_file")], settings.render_fps)
         p_start = max(0.3, self.repo.job(job["id"])["progress"])
         for n, scene in enumerate(scenes, 1):
             self._progress(job, p_start + (0.92 - p_start) * (n - 1) / len(scenes),
@@ -453,16 +659,21 @@ class Engine:
             seconds = lengths[n - 1]
             # Faded sides need half a fade of extra picture (fades are centred on the cut).
             clip_seconds = media.crossfade_clip_seconds(lengths, fades, n - 1)
-            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{preset['width']}x{preset['height']}|"
-                               f"{settings.render_fps}|{keep_audio}".encode()).hexdigest()[:10]
+            lead = fades[n - 2] / 2 if n > 1 else 0.0
+            retime = seconds if timeline else None
+            keep_frames = None if retime or fades[n - 1] else self._seam(project, scenes, n - 1, ws)
+            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|{retime}|"
+                               f"{preset['width']}x{preset['height']}|"
+                               f"{fps:g}|{keep_audio}".encode()).hexdigest()[:10]
             norm = ws.path("norm", f"scene_{scene['idx']}_{key}.mp4")
             if not norm.exists():
                 # Write under a unique name then rename: a preview and a render may
                 # normalise the same clip at the same moment.
                 part = norm.with_name(f"{norm.stem}.{uuid.uuid4().hex[:8]}.part.mp4")
                 media.normalize_clip(ws.path(scene["clip_file"]), part, width=preset["width"],
-                                     height=preset["height"], fps=settings.render_fps, seconds=clip_seconds,
-                                     keep_audio=keep_audio, preset=settings.ffmpeg_preset)
+                                     height=preset["height"], fps=fps, seconds=clip_seconds,
+                                     keep_audio=keep_audio, preset=settings.ffmpeg_preset, lead=lead,
+                                     keep_frames=keep_frames, retime=retime)
                 os.replace(part, norm)
             norm_clips.append(norm)
             narr_src = ws.path(scene["narration_file"]) if scene.get("narration_file") and not song else None
@@ -490,9 +701,6 @@ class Engine:
                                                   encoding="utf-8")
             ass_name = f"{out_name}.ass"
 
-        music = None
-        if opts.get("music_mode") != "none" and opts.get("music_file") and ws.path(opts["music_file"]).exists():
-            music = ws.path(opts["music_file"])
         self._progress(job, 0.95, "Mixing audio & subtitle…")
         tmp_final = ws.path(tmp_dir, f"{out_name}.mp4")
         volume = 1.0 if song else float(opts.get("music_volume") or 0.25)  # a song is the main audio

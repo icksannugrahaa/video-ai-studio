@@ -1,14 +1,16 @@
 import React from 'react';
 import Icon from './Icon.jsx';
+import { useT, useI18n } from '../i18n.jsx';
 
 /* ---------- formatting ---------- */
-export function fmtDuration(seconds) {
+export function fmtDuration(seconds, t) {
+  const tr = t || ((k) => k);
   const s = Math.max(0, Math.round(Number(seconds) || 0));
-  if (s < 60) return `${s} dtk`;
+  if (s < 60) return `${s} ${tr('time.seconds')}`;
   const m = Math.floor(s / 60);
   const rest = s % 60;
-  if (m < 60) return rest ? `${m}:${String(rest).padStart(2, '0')} mnt` : `${m} mnt`;
-  return `${Math.floor(m / 60)} j ${m % 60} mnt`;
+  if (m < 60) return rest ? `${m}:${String(rest).padStart(2, '0')} ${tr('time.minutes')}` : `${m} ${tr('time.minutes')}`;
+  return `${Math.floor(m / 60)} ${tr('time.hourShort')} ${m % 60} ${tr('time.minutes')}`;
 }
 
 export function fmtClock(seconds) {
@@ -16,14 +18,25 @@ export function fmtClock(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-export function timeAgo(epochSeconds) {
+export function timeAgo(epochSeconds, t, locale) {
   if (!epochSeconds) return '';
+  const tr = t || ((k, p) => (p && p.n != null ? k : k));
   const diff = Math.max(0, Date.now() / 1000 - epochSeconds);
-  if (diff < 60) return 'baru saja';
-  if (diff < 3600) return `${Math.floor(diff / 60)} mnt lalu`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} jam lalu`;
-  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} hari lalu`;
-  return new Date(epochSeconds * 1000).toLocaleDateString('id-ID');
+  if (diff < 60) return tr('time.now');
+  if (diff < 3600) return tr('time.minutesAgo', { n: Math.floor(diff / 60) });
+  if (diff < 86400) return tr('time.hoursAgo', { n: Math.floor(diff / 3600) });
+  if (diff < 86400 * 30) return tr('time.daysAgo', { n: Math.floor(diff / 86400) });
+  return new Date(epochSeconds * 1000).toLocaleDateString(locale || 'id-ID');
+}
+
+/** Locale-aware helpers bound to the current language. */
+export function useFmt() {
+  const { t, lang } = useI18n();
+  return React.useMemo(() => ({
+    duration: (s) => fmtDuration(s, t),
+    clock: fmtClock,
+    ago: (epoch) => timeAgo(epoch, t, lang === 'en' ? 'en-US' : 'id-ID'),
+  }), [t, lang]);
 }
 
 export async function copyText(text) {
@@ -41,23 +54,24 @@ export async function copyText(text) {
 
 /* ---------- status vocab ---------- */
 const STATUS = {
-  draft: ['Draft', ''],
-  planned: ['Storyboard siap', 'accent'],
-  rendering: ['Rendering', 'warn live'],
-  done: ['Selesai', 'ok'],
-  error: ['Gagal', 'bad'],
-  queued: ['Antre', 'warn live'],
-  running: ['Berjalan', 'info live'],
-  succeeded: ['Berhasil', 'ok'],
-  failed: ['Gagal', 'bad'],
-  canceled: ['Dibatalkan', ''],
-  pending: ['Belum', ''],
-  stale: ['Perlu dibuat ulang', 'warn'],
+  draft: ['status.draft', ''],
+  planned: ['status.planned', 'accent'],
+  rendering: ['status.rendering', 'warn live'],
+  done: ['status.done', 'ok'],
+  error: ['status.error', 'bad'],
+  queued: ['status.queued', 'warn live'],
+  running: ['status.running', 'info live'],
+  succeeded: ['status.succeeded', 'ok'],
+  failed: ['status.failed', 'bad'],
+  canceled: ['status.canceled', ''],
+  pending: ['status.pending', ''],
+  stale: ['status.stale', 'warn'],
 };
 
 export function StatusBadge({ status, label }) {
-  const [text, tone] = STATUS[status] || [status, ''];
-  return <span className={`badge ${tone}`}><span className="dot" />{label || text}</span>;
+  const t = useT();
+  const [key, tone] = STATUS[status] || [null, ''];
+  return <span className={`badge ${tone}`}><span className="dot" />{label || (key ? t(key) : status)}</span>;
 }
 
 /* ---------- small controls ---------- */
@@ -117,12 +131,13 @@ export function Empty({ icon = 'film', title, children }) {
   );
 }
 
-export function CopyButton({ text, label = 'Salin', className = 'sm' }) {
+export function CopyButton({ text, label, className = 'sm' }) {
+  const t = useT();
   const [done, setDone] = React.useState(false);
   return (
     <Button className={className} icon={done ? 'check' : 'copy'} disabled={!text}
       onClick={async () => { await copyText(text); setDone(true); setTimeout(() => setDone(false), 1800); }}>
-      {done ? 'Tersalin' : label}
+      {done ? t('action.copied') : (label || t('action.copy'))}
     </Button>
   );
 }
@@ -149,8 +164,9 @@ const ToastCtx = React.createContext(() => {});
 export const useToast = () => React.useContext(ToastCtx);
 
 export function ToastProvider({ children }) {
+  const tr = useT();
   const [items, setItems] = React.useState([]);
-  const dismiss = React.useCallback((id) => setItems((list) => list.filter((t) => t.id !== id)), []);
+  const dismiss = React.useCallback((id) => setItems((list) => list.filter((x) => x.id !== id)), []);
   const push = React.useCallback((message, tone = 'ok') => {
     if (!message) return;
     const id = Math.random().toString(36).slice(2);
@@ -166,7 +182,7 @@ export function ToastProvider({ children }) {
           <div key={t.id} className={`toast ${t.tone}`}>
             <Icon name={icons[t.tone] || 'info'} />
             <span>{t.message}</span>
-            <button className="btn ghost icon sm" aria-label="Tutup" onClick={() => dismiss(t.id)}><Icon name="x" size={14} /></button>
+            <button className="btn ghost icon sm" aria-label={tr('action.close')} onClick={() => dismiss(t.id)}><Icon name="x" size={14} /></button>
           </div>
         ))}
       </div>
@@ -179,6 +195,7 @@ const DialogCtx = React.createContext(null);
 export const useDialog = () => React.useContext(DialogCtx);
 
 function Dialog({ spec, onClose }) {
+  const t = useT();
   const [value, setValue] = React.useState(spec.defaultValue || '');
   const ok = React.useRef(null);
   React.useEffect(() => {
@@ -198,9 +215,9 @@ function Dialog({ spec, onClose }) {
             placeholder={spec.placeholder} onChange={(e) => setValue(e.target.value)} style={{ marginBottom: 18 }} />
         )}
         <div className="actions">
-          <button type="button" className="btn ghost" onClick={() => onClose(null)}>{spec.cancelLabel || 'Batal'}</button>
+          <button type="button" className="btn ghost" onClick={() => onClose(null)}>{spec.cancelLabel || t('action.cancel')}</button>
           <button ref={ok} type="submit" className={`btn ${spec.danger ? 'danger solid' : 'primary'}`}
-            disabled={spec.input && !value.trim()}>{spec.confirmLabel || 'Lanjutkan'}</button>
+            disabled={spec.input && !value.trim()}>{spec.confirmLabel || t('common.continue')}</button>
         </div>
       </form>
     </div>

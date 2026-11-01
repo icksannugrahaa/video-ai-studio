@@ -8,13 +8,16 @@ plain synchronous call for other providers) and text-to-speech.
 from __future__ import annotations
 
 import base64
+import json
 import re
 import time
 from dataclasses import dataclass
 
 import requests
 
-CHAT_TIMEOUT = 180
+CHAT_TIMEOUT = 180  # longest silence between bytes of a chat stream
+CHAT_MAX_WAIT = 15 * 60
+RETRYABLE_STATUS = (408, 409, 425, 429)
 TTS_TIMEOUT = 120
 VIDEO_SUBMIT_TIMEOUT = 120
 VIDEO_SYNC_TIMEOUT = 900
@@ -86,8 +89,9 @@ class ProviderClient:
             err = body.get("error") if isinstance(body, dict) else None
             detail = (err.get("message") if isinstance(err, dict) else err) or body.get("message") or ""
         except ValueError:
-            detail = (resp.text or "")[:200]
-        retryable = resp.status_code in (408, 409, 425, 429) or resp.status_code >= 500
+            text = (resp.text or "").strip()
+            detail = "endpoint mengembalikan halaman error" if text.startswith("<") else text[:200]
+        retryable = resp.status_code in RETRYABLE_STATUS or resp.status_code >= 500
         return ProviderError(f"{what} gagal (HTTP {resp.status_code}): {str(detail)[:200]}",
                              status=resp.status_code, retryable=retryable)
 
@@ -123,25 +127,73 @@ class ProviderClient:
 
     # ── chat ───────────────────────────────────────────────────────────
     def chat(self, model: str, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096) -> str:
+        """Streams on purpose: a silent request dies at the proxy in front of the
+        endpoint (Cloudflare 524 after ~100 s), while the router keeps a stream
+        alive with heartbeats however long the model thinks."""
         resp = self._call(
             "POST", f"{self.base}/v1/chat/completions", "chat",
             headers=self._headers(),
             json={"model": model, "messages": messages, "temperature": temperature,
-                  "max_tokens": max_tokens, "stream": False},
+                  "max_tokens": max_tokens, "stream": True},
             timeout=CHAT_TIMEOUT,
+            stream=True,
         )
-        if resp.status_code != 200:
-            raise self._error(resp, "chat")
         try:
-            choice = (resp.json().get("choices") or [{}])[0]
-            content = (choice.get("message") or {}).get("content")
-        except (ValueError, AttributeError) as exc:
-            raise ProviderError("respons chat tidak valid") from exc
-        if isinstance(content, list):
-            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+            if resp.status_code != 200:
+                raise self._error(resp, "chat")
+            if "text/event-stream" in resp.headers.get("Content-Type", ""):
+                content = self._read_chat_stream(resp)
+            else:  # endpoints that ignore "stream"
+                try:
+                    content = self._message_text((resp.json().get("choices") or [{}])[0])
+                except (ValueError, AttributeError) as exc:
+                    raise ProviderError("respons chat tidak valid") from exc
+        finally:
+            resp.close()
         if not content:
             raise ProviderError("model chat tidak mengembalikan teks")
         return content
+
+    @staticmethod
+    def _message_text(choice: dict) -> str:
+        message = choice.get("delta") or choice.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        return content or ""
+
+    def _read_chat_stream(self, resp: requests.Response) -> str:
+        parts = []
+        deadline = time.monotonic() + CHAT_MAX_WAIT  # heartbeats reset the read timeout, this does not
+        try:
+            for raw in resp.iter_lines():
+                if time.monotonic() > deadline:
+                    raise ProviderError("chat: timeout menunggu endpoint", status=504)
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                err = event.get("error")
+                if err:
+                    detail = err if isinstance(err, dict) else {"message": err}
+                    status = detail.get("status") if isinstance(detail.get("status"), int) else 502
+                    raise ProviderError(f"chat gagal (HTTP {status}): {str(detail.get('message') or '')[:200]}",
+                                        status=status, retryable=status in RETRYABLE_STATUS or status >= 500)
+                for choice in event.get("choices") or []:
+                    parts.append(self._message_text(choice))
+        except requests.Timeout as exc:
+            raise ProviderError("chat: timeout menunggu endpoint", status=504) from exc
+        except requests.RequestException as exc:
+            raise ProviderError(f"chat: koneksi ke endpoint putus ({type(exc).__name__})", status=502) from exc
+        return "".join(parts)
 
     # ── text-to-speech ─────────────────────────────────────────────────
     def tts(self, model: str, text: str, voice: str = "", language: str = "", fmt: str = "wav") -> bytes:
