@@ -592,3 +592,11 @@ def test_video_length_follows_the_song_when_lyrics_have_no_end_marker():
     assert planner.song_lengths(scenes, lyrics) == [5.0, 5.0]
     assert planner.fit_lengths([5.0, 5.0], 40.0) == [20.0, 20.0]
 
+
+
+def test_sung_shot_times_each_placing_to_its_number():
+    options = {"bible_style": "3D"}
+    placing = "Table. START: a. ACTION: takes one apple from the basket, places it right of the first. END: b."
+    assert planner.SONG_PLACING in planner.clip_prompt(options, placing, sung='A song is sung (5s "Dua apel").')
+    assert planner.SONG_PLACING not in planner.clip_prompt(options, placing)
+    assert planner.SONG_PLACING not in planner.clip_prompt(options, "Table. START: a. ACTION: they sway. END: b.", sung="A song.")

@@ -74,8 +74,9 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   untouched>. END: <the last frame, in the same terms as START>."
   Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
-  equal the count in START plus what ACTION adds. The placing is done by the third second of the clip and the hands
-  then leave the objects alone until END. The named place is a story object too: put it on the front edge of the same
+  equal the count in START plus what ACTION adds. Without a song the placing is done by the third second of the clip; in a song each
+  placing falls on the lyric line of the number it brings the count to. The hands then leave the objects alone until END
+  while the characters keep moving gently, so the action lasts to the last frame. The named place is a story object too: put it on the front edge of the same
   surface, closest to the camera with nobody in front of it, never behind a person or at the edge of the frame, always
   written with its full location (never a shorthand like "right-end basket"), and START and END of this shot and of every later shot in
   the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
@@ -137,6 +138,9 @@ SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believ
               "the last placing no further object enters the frame, none is stacked unless the shot says so, and the "
               "objects stay exactly as they are until the last frame. Every object and container named in the shot "
               "stays in view in its place.")
+SONG_PLACING = ("Each object is set down as the number it brings the count to is sung, one object per sung number, and "
+                "none at any other time. After the last placing the hands stay off the objects and the characters keep "
+                "singing and swaying gently until the last frame, never freezing.")
 CAMERA_LOCK = ("The camera is fixed on a tripod: no pan, tilt, zoom, push-in, pull-back or drift; the walls, windows and "
                "table edges keep the same position in the frame from the first to the last frame.")
 _STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera (?:stays )?still|fixed (?:camera|[\w-]* ?shot)|static camera)\b", re.I)
@@ -284,6 +288,9 @@ def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool 
         parts.append(SEEDED_SHOT)
     if sung:
         parts.append(sung)
+        action = _ACTION_RE.search(shot)
+        if action and re.search(r"\b(?:places?|puts?|sets?)\b", action.group(1), re.I):
+            parts.append(SONG_PLACING)
     if _STILL_CAMERA_RE.search(shot.split("START:")[0]):
         parts.append(CAMERA_LOCK)
     parts.append(SHOT_CRAFT)
