@@ -134,6 +134,11 @@ function SceneCard({ scene, index, count, start, project, open, selected, busy, 
                 {t('sb.clipFailedTip')}</div>}
             </div></div>
           )}
+          {scene.clip_error && state !== 'failed' && (
+            <div className="alert warn"><Icon name="alert" /><div>
+              <strong>{t('sb.clipEndWarning')}</strong> {scene.clip_error}
+            </div></div>
+          )}
           <label className="field"><span>{t('sb.visualLabel')} <span className="hint">— {t('sb.visualHint')}</span></span>
             <textarea rows={3} value={scene.visual_prompt} onChange={(e) => onChange('visual_prompt', e.target.value)} />
           </label>

@@ -460,6 +460,118 @@ def test_continuing_shot_starts_in_the_state_the_previous_shot_ends_in():
     assert "START: a bowl." in scenes[2]["visual_prompt"]  # a new location does not inherit anything
 
 
+def test_place_objects_are_taken_from_stays_in_every_later_shot():
+    from app.pipeline import planner
+    # Project 11: the basket was only named in ACTION, vanished mid clip and was missing from the next seed frame.
+    scenes = [{"visual_prompt": "Table. START: one apple, no other apples. ACTION: lifts a second apple from a basket "
+                                "at the right edge, sets it down. END: two apples, no other apples.", "continues": False},
+              {"visual_prompt": "Table. START: x. ACTION: lifts a third apple from the basket at the right edge, "
+                                "sets it down. END: three apples, no other apples.", "continues": True},
+              {"visual_prompt": "Table. START: x. ACTION: sweeps a palm above the apples. END: three apples.", "continues": True},
+              {"visual_prompt": "Yard. START: a ball. ACTION: kicks it. END: a ball.", "continues": False}]
+    planner.keep_sources(scenes)
+    planner.link_shots(scenes)
+    for scene in scenes[:3]:
+        start, end = scene["visual_prompt"].split("ACTION:")[0], scene["visual_prompt"].split("END:")[1]
+        assert "basket at the right edge stays in clear view" in start
+        assert "basket at the right edge stays in clear view" in end
+    assert scenes[0]["visual_prompt"].count("stays in clear view") == 2  # once in START, once in END
+    assert "basket" not in scenes[3]["visual_prompt"]  # a new location does not inherit it
+
+
+def test_container_named_without_a_place_gets_one():
+    from app.pipeline import planner
+    scenes = [{"visual_prompt": "Table. START: one apple and exactly four in the right-end basket, no other apples. ACTION: "
+                                "takes one apple from basket, places it. END: exactly two apples and exactly three in "
+                                "right-end basket, no other apples.", "continues": False},
+              {"visual_prompt": "Table. START: x. ACTION: claps. END: exactly two apples and the right-end basket empty.",
+               "continues": True}]
+    planner.keep_sources(scenes)
+    planner.link_shots(scenes)
+    for scene in scenes:
+        start, end = scene["visual_prompt"].split("ACTION:")[0], scene["visual_prompt"].split("END:")[1]
+        assert "closest to the camera" in start and "closest to the camera" in end
+    once = [s["visual_prompt"] for s in scenes]
+    planner.keep_sources(scenes)
+    assert [s["visual_prompt"] for s in scenes] == once  # a replan of an unchanged shot does not regenerate it
+    assert planner.end_checks(scenes[1]["visual_prompt"])["visible"] == ["basket"]
+
+
+def test_source_already_stated_or_no_source_leaves_the_prompt_alone():
+    from app.pipeline import planner
+    stated = ("Table. START: one apple and a basket on the table. ACTION: takes an apple from the basket. "
+              "END: two apples and a basket on the table.")
+    plain = "She walks from the door to the table, smiling."
+    scenes = [{"visual_prompt": stated, "continues": False}, {"visual_prompt": plain, "continues": False}]
+    planner.keep_sources(scenes)
+    assert [s["visual_prompt"] for s in scenes] == [stated, plain]
+
+
+def test_end_checks_read_project_11_shots_and_compare_the_reading():
+    from app.pipeline import planner
+    scenes = [{"visual_prompt": "T. START: one apple. ACTION: Bu Mila lifts a second large red apple from a basket at the "
+                                "right edge, sets it down. END: Bu Mila hands at her sides; exactly three large red apples "
+                                "in a row, no other apples.", "continues": False},
+              {"visual_prompt": "T. START: x. ACTION: sweeps a palm. END: exactly 5 apples, no other apples.", "continues": True}]
+    planner.keep_sources(scenes)
+    first, closing = (planner.end_checks(s["visual_prompt"]) for s in scenes)
+    assert first == {"count": 3, "noun": "apples", "visible": ["basket"]}
+    assert closing == {"count": 5, "noun": "apples", "visible": ["basket"]}
+    assert '"basket":false' in planner.end_question(first) and "Count the apples" in planner.end_question(first)
+    assert planner.end_problems(first, {"count": 3, "visible": {"basket": True}}) == []
+    assert planner.end_problems(first, {"count": 2, "visible": {"basket": False}}) == ["apples 2, seharusnya 3", "basket tidak terlihat"]
+    assert planner.end_problems(first, {"count": "tiga"}) == []  # no clear mismatch, no bill
+    assert planner.end_checks("A cat jumps over a wall") is None
+    assert planner.end_checks("START: a. ACTION: b. END: the cat sleeps.") is None
+    assert planner.end_checks("END: exactly two apples and exactly one more in the basket.")["visible"] == ["basket"]
+
+
+def test_end_checks_find_the_container_however_the_planner_words_it():
+    from app.pipeline import planner
+    bare = ("START: one. ACTION: Bu Guru takes one apple from basket, places it right of the first. "
+            "END: exactly three apples in row and exactly two in right-end basket, no other apples.")
+    empty = "START: five. ACTION: she claps. END: exactly five apples in row and the right-end basket empty, no other apples."
+    assert planner.end_checks(bare) == {"count": 3, "noun": "apples", "visible": ["basket"]}
+    assert planner.end_checks(empty) == {"count": 5, "noun": "apples", "visible": ["basket"]}
+    assert planner.end_checks("START: a. ACTION: b. END: exactly three apples in row, no other apples.")["visible"] == []
+
+
+def test_later_shots_of_a_sequence_also_check_the_container_of_earlier_shots():
+    from app.pipeline import planner
+    scenes = [{"idx": 0, "continues": 0, "visual_prompt": "START: a. ACTION: takes 1 apple from basket. END: row: exactly 3 apples."},
+              {"idx": 1, "continues": 1, "visual_prompt": "START: a. ACTION: sways. END: row: exactly 3 apples."},
+              {"idx": 2, "continues": 1, "visual_prompt": "START: a. ACTION: sways. END: she smiles."},
+              {"idx": 3, "continues": 0, "visual_prompt": "START: a. ACTION: runs. END: exactly 2 dogs."}]
+    assert planner.sequence_checks(scenes, scenes[1])["visible"] == ["basket"]
+    assert planner.sequence_checks(scenes, scenes[2]) == {"count": None, "noun": "", "visible": ["basket"]}
+    assert planner.sequence_checks(scenes, scenes[3])["visible"] == []  # a new location does not inherit it
+
+
+def test_generated_project_11_wording_gets_no_false_check_and_no_bloat():
+    from app.pipeline import planner
+    shot = ("Table. START: exactly 1 red apple row far left, exactly 4 in basket front right corner, no other apples. "
+            "ACTION: Melati takes 1 from basket, places right of first. "
+            "END: exactly 2 red apples row far left, exactly 3 in basket front right corner, no other apples.")
+    scenes = [{"visual_prompt": shot, "continues": False}]
+    planner.keep_sources(scenes)
+    assert scenes[0]["visual_prompt"] == shot  # it already says where the basket is
+    assert planner.end_checks(shot)["visible"] == ["basket"]  # never asks for a "corner"
+    bare = [{"visual_prompt": "T. START: a basket, 2 apples. ACTION: takes 1 from basket. END: basket empty.", "continues": False}]
+    planner.keep_sources(bare)
+    assert len(bare[0]["visual_prompt"].split()) < 50
+
+
+def test_fixed_camera_shots_get_the_tripod_order():
+    from app.pipeline import planner
+    options = {"bible_style": "35mm look"}
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Table; locked-off camera. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Table; camera stays still. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Room, medium-wide fixed 35mm shot. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK in planner.clip_prompt(options, "Same table, medium-wide 35mm, locked-off. START: a. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK not in planner.clip_prompt(options, "Street; slow dolly. START: a fixed price tag. ACTION: b. END: c.")
+    assert planner.CAMERA_LOCK not in planner.clip_prompt(options, "Street; slow dolly. START: a. ACTION: b. END: c.")
+
+
 def test_seeded_clip_is_told_what_the_previous_shot_showed_unless_it_has_a_start():
     from app.pipeline import planner
     options = {"bible_style": "35mm look"}
@@ -480,3 +592,11 @@ def test_video_length_follows_the_song_when_lyrics_have_no_end_marker():
     assert planner.song_lengths(scenes, lyrics) == [5.0, 5.0]
     assert planner.fit_lengths([5.0, 5.0], 40.0) == [20.0, 20.0]
 
+
+
+def test_sung_shot_times_each_placing_to_its_number():
+    options = {"bible_style": "3D"}
+    placing = "Table. START: a. ACTION: takes one apple from the basket, places it right of the first. END: b."
+    assert planner.SONG_PLACING in planner.clip_prompt(options, placing, sung='A song is sung (5s "Dua apel").')
+    assert planner.SONG_PLACING not in planner.clip_prompt(options, placing)
+    assert planner.SONG_PLACING not in planner.clip_prompt(options, "Table. START: a. ACTION: they sway. END: b.", sung="A song.")

@@ -13,6 +13,8 @@ The app has no AI of its own: each user supplies an **OpenAI-compatible endpoint
   <img alt="Vite" src="https://img.shields.io/badge/Vite-5-646cff">
 </p>
 
+**Demo video:** <https://youtu.be/rqsrdNim1Ss>
+
 ## Table of contents
 
 - [Features](#features)
@@ -35,8 +37,10 @@ The app has no AI of its own: each user supplies an **OpenAI-compatible endpoint
 - **Per-sentence TTS narration** → accurately timed subtitles (burned-in ASS + SRT file)
 - **Background music** upload with automatic ducking, −14 LUFS loudness
 - **Platform presets**: 9:16, 16:9, 1:1, 4:5 (+ duration limits)
+- **Song mode**: lyrics timed to the scenes, used for the subtitles instead of TTS narration
 - **Edit via prompt** — only the changed scenes are regenerated
 - **Resumable renders** after a restart (per-scene state persisted in the DB)
+- **UI in Indonesian and English**
 
 ## Architecture
 

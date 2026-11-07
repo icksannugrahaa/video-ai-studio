@@ -8,6 +8,7 @@ keys never appear in them.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import os
@@ -32,6 +33,9 @@ CLIP_ATTEMPTS = 3
 CLIP_RETRY_DELAYS = (30, 90)
 NARRATION_TAIL = 0.4  # seconds of breathing room after the last sentence
 SEAM_DISSOLVE = 0.2  # seconds, continuing shots
+GAIN_LIMIT = 0.15  # most a chain's colour may be corrected
+MAX_SLOWDOWN = 1.15  # more than this is noticeable
+MIN_STILL_TAIL = 0.5  # seconds; a shorter hold reads as a natural beat
 
 
 def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[list[dict]]:
@@ -53,10 +57,10 @@ def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[li
 
 
 def render_fps(clips: list[Path], default: int) -> float:
-    """Keep the clips' own frame rate when they share one at or below the
-    configured rate: converting 24 fps clips to 30 fps repeats every 4th frame,
+    """Keep the clips' own motion rate when they share one at or below the
+    configured rate: converting 24 fps motion to 30 fps repeats every 5th frame,
     which shows as a steady stutter."""
-    rates = {round(media.video_fps(c), 3) for c in clips if c.exists()}
+    rates = {round(media.motion_fps(c), 3) for c in clips if c.exists()}
     rate = rates.pop() if len(rates) == 1 else 0.0
     return rate if 0 < rate <= default else float(default)
 
@@ -80,6 +84,25 @@ def scene_transitions(scenes: list[dict], lengths: list[float], options: dict,
         fade = min(wanted, SEAM_DISSOLVE) if scenes[i + 1].get("continues") and i not in broken else wanted
         fades.append(round(min(fade, lengths[i] / 3, lengths[i + 1] / 3), 3))
     return fades
+
+
+def trimmed_end(clip_seconds: float, active: float, target: float) -> float | None:
+    """Where to end a clip that holds its pose after ``active`` seconds so the rest,
+    slowed down at most ``MAX_SLOWDOWN``, still fills ``target``. ``None`` = keep it."""
+    end = max(active, target / MAX_SLOWDOWN)
+    return round(end, 3) if end < target and clip_seconds - end >= MIN_STILL_TAIL else None
+
+
+def chain_gains(seams: list[tuple[float, float, float] | None]) -> list[tuple[float, float, float]]:
+    """Colour gain per scene from the gain each seam needs (``None`` = the next
+    scene is not seeded, so its chain starts clean). A chain is carried along so
+    every clip lands on the colour of the one before it; capped because a larger
+    difference is a real change of picture, not a colour shift."""
+    gains = [(1.0, 1.0, 1.0)]
+    for seam in seams:
+        gains.append(tuple(max(1 - GAIN_LIMIT, min(1 + GAIN_LIMIT, g * s))
+                           for g, s in zip(gains[-1], seam)) if seam else (1.0, 1.0, 1.0))
+    return gains
 
 
 def _bible_options(board: dict) -> dict:
@@ -384,8 +407,7 @@ class Engine:
                     state["running"] += 1
                 try:
                     self._generate_one(job, project, profile, client, preset, scene, ws, seed)
-                    if seed is not None:
-                        self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
+                    self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
                 except BaseException:
                     stop.set()
                     raise
@@ -475,22 +497,54 @@ class Engine:
         except media.MediaError:
             return False
 
-    def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed) -> None:
-        """A clip that left its seed gets one more (billed) try; the closer of the
-        two stays. The first clip is already saved, so a failed retake costs nothing."""
-        prev = self._previous_clip(project, scene, ws)
-        first = next(s for s in self.repo.scenes(project["id"]) if s["id"] == scene["id"])
+    def _end_state_problems(self, profile, client, scene, clip: Path, checks: dict | None) -> list[str]:
+        """What the clip's last frame lacks compared to its END. It seeds the next
+        clip, so whatever is lost here stays lost. A failed check is no finding."""
+        if not checks or not profile["chat_model"]:
+            return []
+        frame = clip.with_name(f"{clip.stem}_end.jpg")
         try:
-            gap = media.seam_gap(prev, ws.path(first["clip_file"]))
-            if gap <= media.SEAM_BREAK:
+            media.last_frame_png(clip, frame)
+            image = "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
+            reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
+                {"type": "text", "text": planner.end_question(checks)},
+                {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
+            return planner.end_problems(checks, planner.extract_json(reply))
+        except (ProviderError, media.MediaError, planner.PlanError):
+            log.warning("scene %s end state check skipped", scene["idx"])
+            return []
+        finally:
+            frame.unlink(missing_ok=True)
+
+    def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed) -> None:
+        """A clip that left its seed or ends without what its shot promises gets one
+        more (billed) try; the better of the two stays and what is still wrong is
+        shown on the scene. The first clip is already saved, so a failed retake
+        costs nothing."""
+        prev = self._previous_clip(project, scene, ws)
+        scenes = self.repo.scenes(project["id"])
+        first = next(s for s in scenes if s["id"] == scene["id"])
+        checks = planner.sequence_checks(scenes, first)
+
+        def flaws(clip: Path) -> tuple[list[str], float]:
+            gap = media.seam_gap(prev, clip) if seed is not None and prev else 0.0
+            return self._end_state_problems(profile, client, scene, clip, checks), gap
+
+        left: list[str] = []
+        try:
+            left, gap = flaws(ws.path(first["clip_file"]))
+            if not left and gap <= media.SEAM_BREAK:
                 return
             self._progress(job, self.repo.job(job["id"])["progress"],
-                           f"Scene {scene['idx'] + 1} tidak menyambung, generate ulang sekali…")
+                           f"Scene {scene['idx'] + 1} tidak sesuai, generate ulang sekali…")
             self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
             video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
             name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
             ws.path(name).write_bytes(video.data)
-            closer = media.seam_gap(prev, ws.path(name)) < gap
+            retake_left, retake_gap = flaws(ws.path(name))
+            closer = (bool(retake_left), retake_gap) < (bool(left), gap)
+            if closer:
+                left = retake_left
         except ProviderError as exc:
             if exc.status == 499:
                 raise JobCanceled() from exc
@@ -500,7 +554,8 @@ class Engine:
             log.warning("scene %s retake unreadable", scene["idx"])
             return
         finally:
-            self.repo.update_scene(scene["id"], clip_status="done")
+            self.repo.update_scene(scene["id"], clip_status="done",
+                                   clip_error=f"Frame terakhir: {', '.join(left)}"[:300] if left else None)
         loser = first["clip_file"] if closer else name
         if closer:
             self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)
@@ -534,6 +589,18 @@ class Engine:
                 except media.MediaError:
                     pass
         return broken
+
+    def _seam_gains(self, scenes: list[dict], ws) -> list[tuple[float, float, float]]:
+        seams: list[tuple[float, float, float] | None] = []
+        for i in range(len(scenes) - 1):
+            nxt, gain = scenes[i + 1], None
+            if nxt.get("continues") and nxt["idx"] == scenes[i]["idx"] + 1 and nxt.get("clip_file"):
+                try:
+                    gain = media.seam_colour_gain(ws.path(scenes[i]["clip_file"]), ws.path(nxt["clip_file"]))
+                except media.MediaError:
+                    pass
+            seams.append(gain)
+        return chain_gains(seams)
 
     @staticmethod
     def _music_path(project: dict, ws) -> Path | None:
@@ -651,6 +718,7 @@ class Engine:
         fades = ([0.0] * len(scenes) if not media.has_filter("xfade")
                  else scene_transitions(scenes, lengths, opts, self._broken_seams(project, scenes, ws)))
         fps = render_fps([ws.path(s["clip_file"]) for s in scenes if s.get("clip_file")], settings.render_fps)
+        gains = self._seam_gains(scenes, ws)
         p_start = max(0.3, self.repo.job(job["id"])["progress"])
         for n, scene in enumerate(scenes, 1):
             self._progress(job, p_start + (0.92 - p_start) * (n - 1) / len(scenes),
@@ -661,10 +729,18 @@ class Engine:
             clip_seconds = media.crossfade_clip_seconds(lengths, fades, n - 1)
             lead = fades[n - 2] / 2 if n > 1 else 0.0
             retime = seconds if timeline else None
+            active = None
+            if n < len(scenes):
+                try:
+                    src = ws.path(scene["clip_file"])
+                    active = trimmed_end(media.duration(src), media.active_seconds(src), retime or seconds)
+                except media.MediaError:
+                    pass
+            retime = (retime or seconds) if active else retime
             keep_frames = None if retime or fades[n - 1] else self._seam(project, scenes, n - 1, ws)
             key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|{retime}|"
                                f"{preset['width']}x{preset['height']}|"
-                               f"{fps:g}|{keep_audio}".encode()).hexdigest()[:10]
+                               f"{fps:g}|{keep_audio}|{gains[n - 1]}|{active}".encode()).hexdigest()[:10]
             norm = ws.path("norm", f"scene_{scene['idx']}_{key}.mp4")
             if not norm.exists():
                 # Write under a unique name then rename: a preview and a render may
@@ -673,7 +749,8 @@ class Engine:
                 media.normalize_clip(ws.path(scene["clip_file"]), part, width=preset["width"],
                                      height=preset["height"], fps=fps, seconds=clip_seconds,
                                      keep_audio=keep_audio, preset=settings.ffmpeg_preset, lead=lead,
-                                     keep_frames=keep_frames, retime=retime)
+                                     keep_frames=keep_frames, retime=retime,
+                                     gain=None if gains[n - 1] == (1.0, 1.0, 1.0) else gains[n - 1], active=active)
                 os.replace(part, norm)
             norm_clips.append(norm)
             narr_src = ws.path(scene["narration_file"]) if scene.get("narration_file") and not song else None

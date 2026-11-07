@@ -69,6 +69,25 @@ def video_fps(path: Path) -> float:
     return 0.0
 
 
+_MOTION_RATES = (24.0, 25.0, 30.0)
+
+
+def motion_fps(path: Path) -> float:
+    """Rate at which the picture really changes. Models deliver 24 fps motion in
+    a 60 fps file; only a rate that clearly matches a standard one is trusted, a
+    still shot just has few changes and keeps the file's rate."""
+    rate = video_fps(path)
+    frames = _grey_frames(path)
+    if rate <= 0 or len(frames) < 2:
+        return rate
+    steps = sum(a != b and sum(abs(x - y) for x, y in zip(a, b)) / len(a) > 0.02 for a, b in zip(frames, frames[1:]))
+    seen = (steps + 1) * rate / len(frames)
+    for standard in _MOTION_RATES:
+        if standard < rate * 0.9 and abs(seen - standard) <= standard * 0.02:
+            return standard
+    return rate
+
+
 def audible_end(path: Path) -> float:
     """Where the sound really ends: generated songs often close with seconds of
     silence that must not become a frozen end of the video."""
@@ -161,9 +180,51 @@ def seam_broken(prev: Path, nxt: Path) -> bool:
     return seam_gap(prev, nxt) > SEAM_BREAK
 
 
+STILL_MOTION = 4.5  # grey change per second (0-255); idle poses measure about 3, acted ones 6+
+
+
+def active_seconds(path: Path, *, window: float = 0.25) -> float:
+    """Where a clip's action ends: models often finish early and hold the pose,
+    which plays as a stall right before the next clip starts moving again."""
+    rate = video_fps(path)
+    frames = _grey_frames(path)
+    if rate <= 0 or len(frames) < 2:
+        return duration(path)
+    steps = [sum(abs(x - y) for x, y in zip(a, b)) / len(a) for a, b in zip(frames, frames[1:])]
+    size = max(1, round(window * rate))
+    end = len(steps)
+    while end >= size and sum(steps[end - size:end]) / window < STILL_MOTION:
+        end -= size
+    return (end + 1) / rate
+
+
+def seam_colour_mean(path: Path, *, last: bool = False) -> tuple[float, float, float]:
+    """Mean red, green and blue of a clip's first or last frame."""
+    w, h = _SEAM_SIZE
+    args = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", *(["-sseof", "-0.5"] if last else []), "-i", str(path),
+            *([] if last else ["-frames:v", "1"]), "-vf", f"scale={w}:{h},format=rgb24", "-f", "rawvideo", "-"]
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError("ffmpeg timeout") from exc
+    size = w * h * 3
+    if proc.returncode != 0 or len(proc.stdout) < size:
+        raise MediaError("gagal membaca frame clip")
+    frame = proc.stdout[-size:]
+    return tuple(sum(frame[c::3]) / (w * h) for c in range(3))
+
+
+def seam_colour_gain(prev: Path, nxt: Path) -> tuple[float, float, float]:
+    """Per-channel gain that gives a seeded clip's first frame the colour of the
+    previous clip's end: models re-render the seed slightly darker every time."""
+    before, after = seam_colour_mean(prev, last=True), seam_colour_mean(nxt)
+    return tuple(b / a if a else 1.0 for b, a in zip(before, after))
+
+
 def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float, seconds: float,
                    keep_audio: bool, preset: str = "veryfast", lead: float = 0.0,
-                   keep_frames: int | None = None, retime: float | None = None) -> Path:
+                   keep_frames: int | None = None, retime: float | None = None,
+                   gain: tuple[float, float, float] | None = None, active: float | None = None) -> Path:
     """Scale/crop ``src`` to fill ``width``×``height``, pad it to ``seconds``
     and always emit a stereo AAC track (silent if needed).
 
@@ -176,9 +237,15 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     and slows the rest down a little so the clip keeps its length. ``retime``
     plays the clip over that many seconds, so it fills a sung section without
     a frozen tail (kept to a speed change that still looks natural); a section
-    too long for that plays the clip forward and back instead of freezing."""
+    too long for that plays the clip forward and back instead of freezing.
+    ``gain`` multiplies red, green and blue (see :func:`seam_colour_gain`).
+    ``active`` drops the picture after that second (see :func:`active_seconds`)."""
     src_seconds = duration(src)
     stretch = ""
+    cut = ""
+    if active:
+        cut = f"trim=end={active:.3f},setpts=PTS-STARTPTS,"
+        src_seconds = active
     if keep_frames:
         kept = keep_frames / (video_fps(src) or 24.0)
         factor = src_seconds / kept if kept else 1.0
@@ -198,7 +265,8 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     head = min(missing, max(0.0, lead))
     pad = missing - head + 0.1
     tpad = f"tpad=start_mode=clone:start_duration={head:.3f}:" if head > 0 else "tpad="
-    vf = (f"{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+    tint = f"colorchannelmixer=rr={gain[0]:.4f}:gg={gain[1]:.4f}:bb={gain[2]:.4f}," if gain else ""
+    vf = (f"{tint}{cut}{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
           f"setsar=1,fps={fps:g},{bounce}{tpad}stop_mode=clone:stop_duration={pad:.3f}")
     args: list = ["-i", src]
     if keep_audio and has_audio(src):

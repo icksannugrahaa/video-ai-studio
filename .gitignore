@@ -6,3 +6,4 @@ __pycache__/
 data/
 ui/node_modules/
 .DS_Store
+CLAUDE.local.md

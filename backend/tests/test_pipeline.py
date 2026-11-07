@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
+
 from app.pipeline import media
 from tests.conftest import login, needs_ffmpeg
 
@@ -424,6 +426,68 @@ def test_worse_retake_is_dropped_and_clip_is_not_retried_again(app, client, fake
     assert not (settings.projects_dir / str(pid) / "clips" / "scene_1_v1_retake.mp4").exists()
 
 
+def _basket_board(fake_client, monkeypatch):
+    shot = ("Table. START: one apple. ACTION: lifts an apple from a basket on the table, sets it down. "
+            "END: exactly two large red apples in a row and a basket on the table.")
+    board = _bible_board(False)
+    board["scenes"][0]["visual_prompt"] = shot
+    monkeypatch.setattr(fake_client, "storyboard", board)
+
+
+def _answers(fake_client, monkeypatch, *replies):
+    """The chat model's reading of each last frame, in order."""
+    plain, queue = fake_client.chat, list(replies)
+
+    def chat(self, model, messages, temperature=0.7, max_tokens=4096):
+        if isinstance(messages[-1]["content"], list):
+            fake_client.calls.append(("look", messages[-1]["content"][1]["image_url"]["url"][:22]))
+            return queue.pop(0)
+        return plain(self, model, messages, temperature, max_tokens)
+
+    monkeypatch.setattr(fake_client, "chat", chat)
+
+
+@needs_ffmpeg
+def test_clip_ending_without_what_its_shot_promises_is_retaken_even_unseeded(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    _answers(fake_client, monkeypatch, '{"count":2,"visible":{"basket":false}}', '{"count":2,"visible":{"basket":true}}')
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2
+    assert [c for c in fake_client.calls if c[0] == "look"][0][1] == "data:image/jpeg;base64,"[:22]
+    assert scene["clip_file"].endswith("_retake.mp4") and not scene["clip_error"]
+
+
+@needs_ffmpeg
+def test_end_state_still_wrong_after_the_retake_is_shown_on_the_scene(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    wrong = '{"count":2,"visible":{"basket":false}}'
+    _answers(fake_client, monkeypatch, wrong, wrong)
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2  # never a third bill
+    assert scene["clip_status"] == "done" and scene["clip_file"] == "clips/scene_0_v1.mp4"
+    assert "basket tidak terlihat" in scene["clip_error"]
+
+
+@needs_ffmpeg
+def test_unreadable_answer_bills_no_retake(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    _answers(fake_client, monkeypatch, "maaf, saya tidak bisa melihat gambar")
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 1 and not scene["clip_error"]
+
+
 @needs_ffmpeg
 def test_failed_retake_keeps_the_first_clip(app, client, fake_client, monkeypatch):
     pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
@@ -700,3 +764,58 @@ def test_song_render_keeps_user_lyrics_and_only_fills_the_prompt(app, client, fa
     assert detail["options"]["lyrics"] == mine
     assert mine in detail["options"]["music_prompt"]
     assert "chat" not in [c[0] for c in fake_client.calls]
+
+
+@needs_ffmpeg
+def test_render_fps_sees_through_repeated_frames(tmp_path):
+    """Models deliver 24 fps motion in a 60 fps file; rendering that at 30 repeats every 5th frame."""
+    import subprocess
+    from app.engine import render_fps
+    clip = tmp_path / "pulldown.mp4"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=128x72:r=24:d=2",
+                    "-vf", "fps=60,format=yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", str(clip)], check=True)
+    assert media.video_fps(clip) == 60
+    assert render_fps([clip], 30) == 24
+
+
+@needs_ffmpeg
+def test_seam_colour_gain_and_normalize(tmp_path):
+    prev = _colour_clip(tmp_path / "p.mp4", [("0x808080", 0.3)])
+    nxt = _colour_clip(tmp_path / "n.mp4", [("0x747474", 0.3)])
+    gain = media.seam_colour_gain(prev, nxt)
+    assert all(1.05 < g < 1.2 for g in gain)
+    out = media.normalize_clip(nxt, tmp_path / "o.mp4", width=64, height=64, fps=24, seconds=0.3,
+                               keep_audio=False, preset="ultrafast", gain=gain)
+    assert all(abs(a - b) <= 3 for a, b in zip(media.seam_colour_mean(out), media.seam_colour_mean(prev, last=True)))
+
+
+def test_chain_gains_carry_along_a_chain_and_reset_on_a_new_shot():
+    from app.engine import chain_gains
+    gains = chain_gains([(1.1, 1.0, 1.0), (1.1, 1.0, 1.0), None, (0.5, 1.0, 1.0)])
+    assert gains[0] == (1.0, 1.0, 1.0)
+    assert gains[1] == (1.1, 1.0, 1.0)
+    assert gains[2][0] == pytest.approx(1.15)  # capped: a real reshoot must not be painted over
+    assert gains[3] == (1.0, 1.0, 1.0)
+    assert gains[4][0] == pytest.approx(0.85)
+
+
+def test_trimmed_end_cuts_a_still_tail_within_the_slowdown_limit():
+    from app.engine import trimmed_end
+    assert trimmed_end(10.08, 8.9, 10.0) == 8.9
+    assert trimmed_end(10.08, 6.0, 10.0) == pytest.approx(8.696, abs=0.001)  # capped: no slower than 15 %
+    assert trimmed_end(10.08, 9.8, 10.0) is None                             # a short hold stays
+    assert trimmed_end(9.09, 7.0, 3.46) is None                              # scene shorter than the action
+
+
+@needs_ffmpeg
+def test_active_seconds_ignores_a_held_pose_and_normalize_drops_it(tmp_path):
+    import subprocess
+    clip = tmp_path / "held.mp4"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=128x72:r=24:d=3,geq=lum='128+100*sin((X+min(N,48)*6)/9)':cb=128:cr=128",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    assert abs(media.active_seconds(clip) - 2.0) < 0.3
+    out = media.normalize_clip(clip, tmp_path / "o.mp4", width=64, height=64, fps=24, seconds=2.2, keep_audio=False,
+                               preset="ultrafast", retime=2.2, active=2.0)
+    assert abs(media.duration(out) - 2.2) < 0.15
+    assert media.active_seconds(out) > 1.9      # the action now runs to the end instead of stalling

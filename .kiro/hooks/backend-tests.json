@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Run backend tests",
+      "description": "Run the backend test suite after a backend Python file is saved.",
+      "trigger": "PostFileSave",
+      "matcher": "backend/.*\\.py$",
+      "timeout": 180,
+      "action": {
+        "type": "command",
+        "command": "cd backend && ../.venv/bin/python -m pytest -q"
+      }
+    }
+  ]
+}

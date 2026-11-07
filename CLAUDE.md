@@ -41,10 +41,8 @@ Desain lengkap: `docs/specs/2026-10-13-mvp-design.md`.
 
 ## Server produksi (PRoot di HP)
 
-Akses dari Mac via USB: `adb -s 100019012C80000M forward tcp:18022 tcp:8022`
-lalu `ssh -p 18022 127.0.0.1 'cd ~ && bash ./start-ubuntu22.sh "<cmd>"'`.
-Target deploy: `/opt/sandroid-ai-video`. Detail lengkap ada di repo
-bot-sandroid `docs/PROOT_ACCESS.md`. Minta izin sebelum restart proses PM2.
+Detail akses ada di `CLAUDE.local.md` (tidak di-commit). Minta izin sebelum
+restart proses PM2.
 
 ## Proyek terkait
 

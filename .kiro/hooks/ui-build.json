@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Rebuild UI",
+      "description": "Rebuild ui/dist after a UI source file is saved, because the server serves the committed build.",
+      "trigger": "PostFileSave",
+      "matcher": "ui/src/.*",
+      "timeout": 120,
+      "action": {
+        "type": "command",
+        "command": "cd ui && npm run build"
+      }
+    }
+  ]
+}
