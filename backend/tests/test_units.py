@@ -531,8 +531,10 @@ def test_end_checks_find_the_container_however_the_planner_words_it():
     bare = ("START: one. ACTION: Bu Guru takes one apple from basket, places it right of the first. "
             "END: exactly three apples in row and exactly two in right-end basket, no other apples.")
     empty = "START: five. ACTION: she claps. END: exactly five apples in row and the right-end basket empty, no other apples."
-    assert planner.end_checks(bare) == {"count": 3, "noun": "apples", "visible": ["basket"]}
-    assert planner.end_checks(empty) == {"count": 5, "noun": "apples", "visible": ["basket"]}
+    assert planner.end_checks(bare) == {"count": 3, "noun": "apples", "visible": ["basket"], "held": {"basket": 2},
+                                        "held_noun": "apples"}
+    assert planner.end_checks(empty) == {"count": 5, "noun": "apples", "visible": ["basket"], "held": {"basket": 0},
+                                         "held_noun": "apples"}
     assert planner.end_checks("START: a. ACTION: b. END: exactly three apples in row, no other apples.")["visible"] == []
 
 
@@ -674,10 +676,11 @@ def test_song_part_never_holds_two_counting_steps():
 def test_container_contents_and_verbs_are_not_read_as_what_lies_in_view():
     end = planner.end_checks("x. START: a. ACTION: takes one apple from the basket. END: exactly five large red "
                              "apples in a tabletop row; the basket on the table, nearest camera, is empty.")
-    assert end == {"count": 5, "noun": "apples", "visible": ["basket"]}  # "is" is not an object
+    assert end == {"count": 5, "noun": "apples", "visible": ["basket"], "held": {"basket": 0},
+                   "held_noun": "apples"}  # "is" is not an object
     start = planner.start_checks("x. START: tabletop bare; exactly five large red apples in a shallow basket on "
                                  "the table. ACTION: y. END: z.")
-    assert start == {"count": None, "noun": "", "visible": ["basket"]}
+    assert start == {"count": None, "noun": "", "visible": ["basket"], "held": {"basket": 5}, "held_noun": "apples"}
 
 
 def test_last_take_findings_become_an_order_for_the_next_take():
@@ -695,4 +698,18 @@ def test_last_take_findings_become_an_order_for_the_next_take():
 def test_a_single_object_is_counted_and_empty_hands_are_no_container():
     start = planner.start_checks("x. START: Rani center-back; hands empty; exactly one large red apple on the "
                                  "far-left tabletop; exactly four in a basket on the table. ACTION: y. END: z.")
-    assert start == {"count": 1, "noun": "apples", "visible": ["basket"]}
+    assert start == {"count": 1, "noun": "apples", "visible": ["basket"], "held": {"basket": 4}, "held_noun": "apples"}
+
+
+
+def test_objects_held_in_a_container_are_counted_too():
+    # Seen live: a drawn first frame had four apples on the tray where START said five.
+    end = planner.end_checks("x. START: a. ACTION: Rani takes one apple from the tray. END: exactly two large red "
+                             "apples in a tabletop row; exactly three in the tray on the table front-right edge.")
+    assert end["held"] == {"tray": 3}
+    question = planner.end_question(end)
+    assert "How many apples are inside the tray?" in question and '"held":{"tray":0}' in question
+    assert planner.end_problems(end, {"count": 2, "visible": {"tray": True}, "held": {"tray": 3}}) == []
+    assert planner.end_problems(end, {"count": 2, "visible": {"tray": True}, "held": {"tray": 4}}) == \
+        ["apples in tray 4, seharusnya 3"]
+    assert "4 apples in tray instead of 3" in planner.correction_note("Frame terakhir: apples in tray 4, seharusnya 3")

@@ -228,9 +228,20 @@ _ONE_RE = re.compile(r"\bexactly (?:one|1|a single) (?:[a-z-]+ ){0,3}?([a-z]+[^s
                      r"(?=\s+(?:on|in|at|beside|near|by|under|behind|to|lies|sits|stands)\b|\s*[,;.]|\s*$)", re.I)
 
 
+_HELD_RE = re.compile(r"\bexactly (\d+|" + "|".join(_NUMBERS) + r")(?: more)? in (?:(?:a|an|the) )?(?:[a-z-]+ )*?([a-z]+)\b"
+                      r"(?=\s+(?:at|on|in|beside|near|by|under|behind|front|rear|back|left|right)\b|\s*[,;.]|\s*$)", re.I)
+
+
+_NOW_EMPTY_RE = re.compile(r"\b(?:the|a|an) ([a-z]+)\b(?: (?:on|at|in|by|near|beside)\b[^.;]*?)?,?\s+(?:is|stays|remains|now|left) empty\b", re.I)
+
+
+def _number(word: str) -> int | None:
+    return int(word) if word.isdigit() else _NUMBERS.get(word.lower())
+
+
 def _state_checks(state: str, action: str = "") -> dict | None:
     # "exactly five apples in a basket" counts what a container holds, not what lies in view
-    count, held = None, []
+    count, held, inside, held_noun = None, [], {}, ""
     for m in _COUNT_RE.finditer(state):
         if not _IN_CONTAINER_RE.match(state[m.end():]):
             count = count or m
@@ -238,6 +249,15 @@ def _state_checks(state: str, action: str = "") -> dict | None:
         place = _CONTAINER_NAME_RE.match(state[m.end():])
         if place:
             held.append(place.group(1).lower())
+            inside[place.group(1).lower()] = _number(m.group(1))
+            held_noun = held_noun or m.group(2).lower()
+    for m in _HELD_RE.finditer(state):  # "exactly three in the tray"
+        inside.setdefault(m.group(2).lower(), _number(m.group(1)))
+    for m in _LEFT_IN_RE.finditer(state):  # "tray empty"
+        if m.group(2):
+            inside.setdefault(m.group(2).lower(), 0)
+    for m in _NOW_EMPTY_RE.finditer(state):  # "the tray on the table, nearest camera, is empty"
+        inside.setdefault(m.group(1).lower(), 0)
     words = [m.group(1).split()[-1].lower() for m in _SOURCE_RE.finditer(action)] if action else []
     words += [m.group(1).split()[-1].lower() for m in _KEPT_RE.finditer(state)]
     words += [(m.group(1) or m.group(2)).lower() for m in _LEFT_IN_RE.finditer(state)] + held
@@ -249,7 +269,11 @@ def _state_checks(state: str, action: str = "") -> dict | None:
             number, noun = 1, single.group(1).lower() + "s"
     if not (number or words):
         return None
-    return {"count": number or None, "noun": noun, "visible": list(dict.fromkeys(words))}
+    checks = {"count": number or None, "noun": noun, "visible": list(dict.fromkeys(words))}
+    inside = {k: v for k, v in inside.items() if v is not None}
+    if inside:
+        checks["held"], checks["held_noun"] = inside, noun or held_noun or "objects"
+    return checks
 
 
 def end_checks(visual_prompt: str) -> dict | None:
@@ -305,7 +329,7 @@ def end_frame_prompt(options: dict, visual_prompt: str) -> str:
             "No text, captions or watermarks.")
 
 
-_FINDING_COUNT_RE = re.compile(r"([a-z-]+) (\d+), seharusnya (\d+)")
+_FINDING_COUNT_RE = re.compile(r"([a-z-]+(?: in [a-z-]+)?) (\d+), seharusnya (\d+)")
 _FINDING_MISSING_RE = re.compile(r"([a-z-]+) tidak terlihat")
 
 
@@ -347,6 +371,11 @@ def end_question(checks: dict) -> str:
         asks.append(f"Is a {word} visible anywhere, even partly?")
     if checks["visible"]:
         keys.append('"visible":{' + ",".join(f'"{word}":false' for word in checks["visible"]) + "}")
+    held = checks.get("held") or {}
+    for place in held:
+        asks.append(f"How many {checks.get('held_noun') or 'objects'} are inside the {place}?")
+    if held:
+        keys.append('"held":{' + ",".join(f'"{place}":0' for place in held) + "}")
     return " ".join(asks) + " Reply with JSON only: {" + ",".join(keys) + "}"
 
 
@@ -359,6 +388,11 @@ def end_problems(checks: dict, reply: dict) -> list[str]:
         problems.append(f"{checks['noun']} {seen}, seharusnya {checks['count']}")
     visible = reply.get("visible") if isinstance(reply.get("visible"), dict) else {}
     problems += [f"{word} tidak terlihat" for word in checks["visible"] if visible.get(word) is False]
+    seen_held = reply.get("held") if isinstance(reply.get("held"), dict) else {}
+    for place, want in (checks.get("held") or {}).items():
+        got = seen_held.get(place)
+        if isinstance(got, int) and not isinstance(got, bool) and got != want:
+            problems.append(f"{checks.get('held_noun') or 'objects'} in {place} {got}, seharusnya {want}")
     return problems
 
 
