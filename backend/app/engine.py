@@ -515,7 +515,7 @@ class Engine:
         """What the clip's last frame lacks compared to its END. It seeds the next
         clip, so whatever is lost here stays lost. ``None`` when the chat model gave
         no usable answer after a few tries: unknown, never "fine"."""
-        if not checks or not profile["chat_model"]:
+        if not checks or not (profile.get("vision_model") or profile["chat_model"]):
             return []
         frame = clip.with_name(f"{clip.stem}_end.jpg")
         try:
@@ -530,9 +530,10 @@ class Engine:
             frame.unlink(missing_ok=True)
 
     def _frame_problems(self, job, profile, client, scene, frame: Path, checks: dict | None) -> list[str] | None:
-        """Ask the chat model what one frame shows against ``checks``; ``None`` when
-        it gave no usable answer after a few tries."""
-        if not checks or not profile["chat_model"]:
+        """Ask the vision model (else the chat model) what one frame shows against
+        ``checks``; ``None`` when it gave no usable answer after a few tries."""
+        model = profile.get("vision_model") or profile["chat_model"]
+        if not checks or not model:
             return []
         mime = "image/png" if frame.suffix == ".png" else "image/jpeg"
         image = f"data:{mime};base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
@@ -540,7 +541,7 @@ class Engine:
             if attempt:
                 self._sleep(job, END_CHECK_DELAYS[attempt - 1])
             try:
-                reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
+                reply = client.chat(model, [{"role": "user", "content": [
                     {"type": "text", "text": planner.end_question(checks)},
                     {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
                 return planner.end_problems(checks, planner.extract_json(reply))

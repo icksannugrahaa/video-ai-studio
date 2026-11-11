@@ -20,6 +20,7 @@ class ProfileBody(BaseModel):
     video_model: str = Field(default="", max_length=200)
     tts_model: str = Field(default="", max_length=200)
     image_model: str = Field(default="", max_length=200)
+    vision_model: str = Field(default="", max_length=200)
     tts_voice: str = Field(default="", max_length=120)
     clip_seconds: int = Field(default=5, ge=2, le=30)
 

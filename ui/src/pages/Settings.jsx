@@ -5,7 +5,7 @@ import { Button, CopyButton, Empty, timeAgo, useDialog, useToast } from '../comp
 import { useT, useI18n } from '../i18n.jsx';
 
 const EMPTY = { name: '', base_url: 'https://ai.sandroid.works', api_key: '', chat_model: '', video_model: '',
-  tts_model: '', image_model: '', tts_voice: '', clip_seconds: 5 };
+  tts_model: '', image_model: '', vision_model: '', tts_voice: '', clip_seconds: 5 };
 
 function groupByProvider(models, noPrefix) {
   const groups = new Map();
@@ -136,6 +136,8 @@ function ProfileForm({ initial, onSaved, onCancel }) {
               options={models?.tts} loading={loadingModels} onChange={set('tts_model')} />
             <ModelSelect icon="layers" label={t('common.image')} hint={t('settings.modelImageHint')} value={form.image_model}
               options={models?.image} loading={loadingModels} onChange={set('image_model')} />
+            <ModelSelect icon="eye" label={t('common.vision')} hint={t('settings.modelVisionHint')} value={form.vision_model}
+              options={models?.chat} loading={loadingModels} onChange={set('vision_model')} />
           </div>
         </div></div>
 
@@ -225,6 +227,7 @@ export default function Settings() {
                   <span>Video <b>{p.video_model || '—'}</b></span>
                   <span>TTS <b>{p.tts_model || '—'}</b></span>
                   {p.image_model && <span>Image <b>{p.image_model}</b></span>}
+                  {p.vision_model && <span>Vision <b>{p.vision_model}</b></span>}
                 </div>
               </div>
               <div className="row">

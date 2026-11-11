@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     video_model TEXT NOT NULL DEFAULT '',
     tts_model TEXT NOT NULL DEFAULT '',
     image_model TEXT NOT NULL DEFAULT '',
+    vision_model TEXT NOT NULL DEFAULT '',
     tts_voice TEXT NOT NULL DEFAULT '',
     clip_seconds INTEGER NOT NULL DEFAULT 5,
     created_at INTEGER NOT NULL
@@ -112,6 +113,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     profile_columns = {row[1] for row in conn.execute("PRAGMA table_info(profiles)")}
     if "image_model" not in profile_columns:  # keyframes (start/end frame of a clip)
         conn.execute("ALTER TABLE profiles ADD COLUMN image_model TEXT NOT NULL DEFAULT ''")
+    if "vision_model" not in profile_columns:  # reads frames for the end-state checks (empty = chat model)
+        conn.execute("ALTER TABLE profiles ADD COLUMN vision_model TEXT NOT NULL DEFAULT ''")
 
 
 _OPEN_CLOSE_LOCK = threading.Lock()

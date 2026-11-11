@@ -922,3 +922,24 @@ def test_regenerate_feeds_the_findings_to_the_next_take_and_remakes_the_shots_af
     assert len(prompts) == 2  # scene 2 and the scene continuing from it; not the first, not the new sequence
     assert "shot 1" in prompts[0] and "4 apples instead of 5" in prompts[0]
     assert "shot 2" in prompts[1] and "instead of" not in prompts[1]
+
+
+@needs_ffmpeg
+def test_frame_check_uses_the_vision_model_when_one_is_set(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    seen = []
+    plain = fake_client.chat
+
+    def chat(self, model, messages, temperature=0.7, max_tokens=4096):
+        if isinstance(messages[-1]["content"], list):
+            seen.append(model)
+            return '{"count":2,"visible":{"basket":true}}'
+        return plain(self, model, messages, temperature, max_tokens)
+
+    monkeypatch.setattr(fake_client, "chat", chat)
+    project = _setup(client, continuity=True)
+    client.patch(f"/api/profiles/{project['profile_id']}", json={"vision_model": "ag/gemini-3.8-flash-low"})
+    client.post(f"/api/projects/{project['id']}/plan")
+    _run_jobs(app)
+    _rendered(client, app, project["id"])
+    assert seen and set(seen) == {"ag/gemini-3.8-flash-low"}

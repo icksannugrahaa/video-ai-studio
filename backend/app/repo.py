@@ -6,8 +6,8 @@ from __future__ import annotations
 from app.db import Database, dumps, loads, now
 from app.security import hash_password, hash_token, new_api_token
 
-PROFILE_FIELDS = ("name", "base_url", "chat_model", "video_model", "tts_model", "image_model", "tts_voice",
-                  "clip_seconds")
+PROFILE_FIELDS = ("name", "base_url", "chat_model", "video_model", "tts_model", "image_model", "vision_model",
+                  "tts_voice", "clip_seconds")
 PROJECT_FIELDS = ("title", "prompt", "preset", "target_seconds", "language", "profile_id")
 DEFAULT_OPTIONS = {
     "continuity": True,          # last frame of clip N seeds clip N+1
@@ -93,9 +93,10 @@ class Repo:
     def create_profile(self, user_id: int, data: dict, api_key_enc: str) -> int:
         return self.db.execute(
             "INSERT INTO profiles(user_id, name, base_url, api_key_enc, chat_model, video_model, tts_model, "
-            "image_model, tts_voice, clip_seconds, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "image_model, vision_model, tts_voice, clip_seconds, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (user_id, data["name"], data["base_url"], api_key_enc, data.get("chat_model", ""),
              data.get("video_model", ""), data.get("tts_model", ""), data.get("image_model", ""),
+             data.get("vision_model", ""),
              data.get("tts_voice", ""), int(data.get("clip_seconds") or 5), now()),
         )
 
