@@ -138,6 +138,14 @@ def last_frame_png(video: Path, out_png: Path) -> Path:
     return Path(out_png)
 
 
+def first_frame_png(video: Path, out_png: Path) -> Path:
+    """The clip's first frame (what it started from)."""
+    _run(["-i", video, "-frames:v", "1", out_png])
+    if not Path(out_png).exists():
+        raise MediaError("gagal mengambil frame pertama")
+    return Path(out_png)
+
+
 _SEAM_SIZE = (64, 36)  # tiny grey frames: enough to tell poses apart, cheap to compare in Python
 
 

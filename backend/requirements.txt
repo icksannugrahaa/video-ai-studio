@@ -5,3 +5,5 @@ python-multipart>=0.0.9
 itsdangerous>=2.1
 cryptography>=42
 requests>=2.31
+Pillow>=10
+numpy>=1.24

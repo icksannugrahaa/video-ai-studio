@@ -72,24 +72,28 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   from its first moment to its last (how the body moves and how much, e.g. "leans forward, lifts the cup with both
   hands, sips, then smiles"), including small natural behaviour such as a glance or a breath, and what stays
   untouched>. END: <the last frame, in the same terms as START>."
-  Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
+  Counted objects: START says "exactly three large red apples in a row on the table"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
   equal the count in START plus what ACTION adds. ONE counting step per shot: ACTION moves exactly one counted object,
   so counting from 0 to 5 takes five shots (plus an opening and a closing shot when the idea needs them); never two
   placings in one shot, because the video model loses or doubles objects when one clip holds several. Without a song the placing is done by the third second of the clip; in a song the
   placing falls on the lyric line of the number it brings the count to. The hands then leave the objects alone until END
-  while the characters keep moving gently, so the action lasts to the last frame. The named place is a story object too: put it on the front edge of the same
-  surface, closest to the camera with nobody in front of it, never behind a person or at the edge of the frame, always
-  written with its full location (never a shorthand like "right-end basket"), and START and END of this shot and of every later shot in
-  the sequence state where it is and how many objects are left in it (e.g. "exactly three large red apples in a row and
-  exactly two more in a basket on the front right corner of the table, no other apples"), so it never vanishes and later shots take
-  from the same spot. ACTION says the hand takes each object from it ("takes one apple from the basket, places it ...")
-  so nothing appears from nowhere, always naming the object, and END is the pose ACTION finishes in. An emptied container is written as empty, never as "exactly 0". ACTION names each object's spot
+  while the characters keep moving gently, so the action lasts to the last frame. The named place is a story object too:
+  a deep, opaque container whose high rim hides what is inside (e.g. "a deep woven basket"), because a heap of loose
+  objects cannot be kept at an exact number; never a flat tray, plate, mat or bed. Put it BESIDE the surface the row is on,
+  never on it (e.g. "on a low stool touching the right end of the table"), with nobody in front of it, never behind a
+  person or at the edge of the frame, so the whole surface stays free for the row, and always write it with its full
+  location (never a shorthand like "right-end basket"). START and END of this shot and of every later shot in the
+  sequence state where it is but NEVER how many objects it holds (e.g. "exactly three large red apples in a row on the
+  table; a deep woven basket on a low stool touching the right end of the table"), so it never vanishes and later
+  shots take from the same spot; only the row is counted. ACTION says the hand takes each object from it ("takes one
+  apple from the basket, places it ...") so nothing appears from nowhere, always naming the object, and END is the pose
+  ACTION finishes in, the same pose in every shot of the sequence (e.g. hands lowered). ACTION names each object's spot
   from the object before it ("directly to the right of the third apple"), never "the next empty spot". The first shot of
   a sequence gives every person's place on screen and nobody sits or stands between the camera and the objects (e.g. one
   child at each end of the table, turned three-quarters toward the camera). The first shot of a counting sequence leaves visible empty space, in the
-  frame and on the surface, for the final count (e.g. a long table with the row starting at its far left, "the right half of the table is
-  bare"), and ACTION names the free spot for each new object. Describe that space only as bare surface: never name
+  frame and on the surface, for the final count (e.g. a long table with the row starting at its far left end, "the
+  tabletop is bare"), and ACTION names the free spot for each new object, each one a hand's width from the one before. Describe that space only as bare surface: never name
   the objects that will fill it or their final count ("room for five apples"), because the video model draws every
   object a shot names, right away. Vary shot sizes between sequences
   (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
@@ -377,6 +381,34 @@ def end_question(checks: dict) -> str:
     if held:
         keys.append('"held":{' + ",".join(f'"{place}":0' for place in held) + "}")
     return " ".join(asks) + " Reply with JSON only: {" + ",".join(keys) + "}"
+
+
+def boxes_question(noun: str, container: str | None = None) -> str:
+    """Where the counted objects, the surface they lie on and their container are
+    (for :mod:`rig`); boxes in the usual vision-model form, 0-1000."""
+    asks = [f"Look at this single video frame. Give the bounding box of every single {noun} lying on the table "
+            "or surface (not in a hand, not inside a container), one box per object, and the bounding box of the "
+            "top of that table or surface."]
+    keys = ['"objects":[[0,0,0,0]]', '"surface":[0,0,0,0]']
+    if container:
+        asks.append(f"Also the bounding box of the {container} (null when it is not visible).")
+        keys.append('"container":[0,0,0,0]')
+    return (" ".join(asks) + " Every box is [ymin, xmin, ymax, xmax] on a 0-1000 scale of the image. "
+            "Reply with JSON only: {" + ",".join(keys) + "}")
+
+
+def row_counts(visual_prompt: str) -> tuple[int, int, str] | None:
+    """(count at START, count at END, noun) of a shot whose row of counted objects
+    grows by at most one; ``None`` for any other shot."""
+    end = end_checks(visual_prompt)
+    if not (end and end["count"]):
+        return None
+    start = start_checks(visual_prompt)
+    if start and start["count"] and start["noun"] == end["noun"]:
+        first = start["count"]
+    else:
+        first = end["count"] - 1 if moves_objects(visual_prompt) else end["count"]
+    return (first, end["count"], end["noun"]) if 0 <= end["count"] - first <= 1 else None
 
 
 def end_problems(checks: dict, reply: dict) -> list[str]:

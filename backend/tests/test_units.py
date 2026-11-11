@@ -713,3 +713,68 @@ def test_objects_held_in_a_container_are_counted_too():
     assert planner.end_problems(end, {"count": 2, "visible": {"tray": True}, "held": {"tray": 4}}) == \
         ["apples in tray 4, seharusnya 3"]
     assert "4 apples in tray instead of 3" in planner.correction_note("Frame terakhir: apples in tray 4, seharusnya 3")
+
+
+def _scene_png(apples: list[tuple[int, int, int, int]], size=(400, 200)) -> bytes:
+    import io
+    from PIL import Image, ImageDraw
+    image = Image.new("RGB", size, (200, 180, 150))
+    draw = ImageDraw.Draw(image)
+    for box in apples:
+        draw.ellipse(box, fill=(200, 20, 30))
+    out = io.BytesIO()
+    image.save(out, "PNG")
+    return out.getvalue()
+
+
+def _red_at(png: bytes, x: int, y: int) -> bool:
+    import io
+    from PIL import Image
+    r, g, _ = Image.open(io.BytesIO(png)).convert("RGB").getpixel((x, y))
+    return r > 150 and g < 90
+
+
+def test_rig_parses_vision_boxes_and_draws_the_row_up_to_the_total():
+    from app.pipeline import rig
+    assert rig.parse_boxes([[500, 100, 600, 150], [1, 2], "x", [0, 0, 0, 0]], 400, 200) == [(40, 100, 60, 120)]
+    first = (20, 100, 60, 140)
+    made = rig.build(_scene_png([first]), _scene_png([]), [first], None, total=4)
+    assert made.count == 1 and made.capacity == 4
+    assert [s[0] for s in made.slots] == [78, 136, 194]  # one object width plus 45 % apart, rightwards
+    three = rig.compose(made, 3)
+    assert _red_at(three, 98, 120) and _red_at(three, 156, 120) and not _red_at(three, 214, 120)
+    assert rig.compose(made, 1)[:8] == b"\x89PNG\r\n\x1a\n"
+    with pytest.raises(rig.RigError):
+        rig.compose(made, 5)
+
+
+def test_rig_keeps_off_the_container_and_squeezes_the_row_into_the_free_space():
+    from app.pipeline import rig
+    first = (20, 100, 60, 140)
+    made = rig.build(_scene_png([first]), None, [first], (200, 90, 300, 150), total=4)
+    assert all(slot[2] < 200 for slot in made.slots)  # nothing lands on the basket
+    with pytest.raises(rig.RigError):  # four more cannot fit before it
+        rig.build(_scene_png([first]), None, [first], (200, 90, 300, 150), total=5)
+    with pytest.raises(rig.RigError):  # the table ends there
+        rig.build(_scene_png([first]), None, [first], None, total=5, surface=(0, 90, 180, 160))
+
+
+def test_rig_learns_spacing_and_direction_from_the_row():
+    from app.pipeline import rig
+    a, b = (300, 100, 340, 140), (240, 100, 280, 140)
+    made = rig.build(_scene_png([a, b]), _scene_png([a]), [a, b], None, total=3)
+    assert made.slots == [(180, 100, 220, 140)]  # the newest is on the left: the row grows left
+    with pytest.raises(rig.RigError):  # not one row
+        rig.build(_scene_png([a]), None, [a, (100, 10, 140, 50)], None, total=3)
+
+
+def test_row_counts_reads_the_row_of_a_counting_shot():
+    step = ("Table. START: exactly two large red apples in a row on the table; a deep basket on a stool. ACTION: Bu "
+            "Guru takes one apple from the basket, places it right of the second. END: exactly three large red apples "
+            "in a row on the table; a deep basket on a stool.")
+    assert planner.row_counts(step) == (2, 3, "apples")
+    still = step.replace("takes one apple from the basket, places it right of the second", "smiles").replace(
+        "exactly two", "exactly three")
+    assert planner.row_counts(still) == (3, 3, "apples")
+    assert planner.row_counts("Table. START: a cat. ACTION: sleeps. END: a cat.") is None
+    assert "bounding box of the basket" in planner.boxes_question("apples", "basket")

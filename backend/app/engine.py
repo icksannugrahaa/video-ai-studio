@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.config import Settings
-from app.pipeline import media, planner, presets, subtitles
+from app.pipeline import media, planner, presets, rig, subtitles
 from app.pipeline.text import split_sentences
 from app.providers import ProviderClient, ProviderError
 from app.repo import Repo
@@ -388,6 +388,7 @@ class Engine:
 
         def run_chain(chain: list[dict]) -> None:
             remade = False  # the previous clip of this chain changed in this job
+            counting: dict = {}  # rig per counted noun, built once a clip of the chain ends right
             for scene in chain:
                 if stop.is_set():
                     return
@@ -412,7 +413,14 @@ class Engine:
                 with lock:
                     state["running"] += 1
                 try:
-                    seed, last = self._keyframes(job, project, profile, client, preset, scene, ws, seed)
+                    # A continuing counting shot starts and ends on frames drawn with
+                    # the exact count, so one wrong clip is not carried into the next.
+                    drawn = (self._rig_frames(job, project, profile, client, chain, scene, ws, counting)
+                             if seed is not None else None)
+                    if drawn:
+                        seed, last = drawn
+                    else:
+                        seed, last = self._keyframes(job, project, profile, client, preset, scene, ws, seed)
                     self._generate_one(job, project, profile, client, preset, scene, ws, seed, last)
                     self._retake_broken(job, project, profile, client, preset, scene, ws, seed, last)
                 except BaseException:
@@ -532,19 +540,29 @@ class Engine:
     def _frame_problems(self, job, profile, client, scene, frame: Path, checks: dict | None) -> list[str] | None:
         """Ask the vision model (else the chat model) what one frame shows against
         ``checks``; ``None`` when it gave no usable answer after a few tries."""
-        model = profile.get("vision_model") or profile["chat_model"]
-        if not checks or not model:
+        if not checks or not (profile.get("vision_model") or profile["chat_model"]):
             return []
+        reply = self._ask_frame(job, profile, client, scene, frame, planner.end_question(checks))
+        return None if reply is None else planner.end_problems(checks, reply)
+
+    def _ask_frame(self, job, profile, client, scene, frame: Path, question: str,
+                   delays: tuple = None) -> dict | None:
+        """The vision model's (else the chat model's) JSON answer about one frame;
+        ``None`` when it gave no usable answer after a few tries."""
+        model = profile.get("vision_model") or profile["chat_model"]
+        if not model:
+            return None
+        delays = END_CHECK_DELAYS if delays is None else delays
         mime = "image/png" if frame.suffix == ".png" else "image/jpeg"
         image = f"data:{mime};base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
-        for attempt in range(len(END_CHECK_DELAYS) + 1):
+        for attempt in range(len(delays) + 1):
             if attempt:
-                self._sleep(job, END_CHECK_DELAYS[attempt - 1])
+                self._sleep(job, delays[attempt - 1])
             try:
                 reply = client.chat(model, [{"role": "user", "content": [
-                    {"type": "text", "text": planner.end_question(checks)},
+                    {"type": "text", "text": question},
                     {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
-                return planner.end_problems(checks, planner.extract_json(reply))
+                return planner.extract_json(reply)
             except ProviderError as exc:
                 if exc.status == 499:
                     raise
@@ -553,6 +571,93 @@ class Engine:
                 reason = "no JSON answer"
             log.warning("scene %s frame check attempt %s failed (%s)", scene["idx"], attempt + 1, reason)
         return None
+
+    # counting rig -------------------------------------------------------
+    def _rig_frames(self, job, project, profile, client, chain, scene, ws, state: dict):
+        """(first, last) frames drawn by :mod:`rig` for a continuing counting shot:
+        exactly the count its START and END name, cut from the last clip of the
+        sequence that was checked to end right. ``None`` → the usual frames."""
+        counts = planner.row_counts(scene["visual_prompt"])
+        if not counts or not (profile.get("vision_model") or profile["chat_model"]):
+            return None
+        first, final, noun = counts
+        made = state.get(noun)
+        if made is None:
+            made = self._build_rig(job, project, profile, client, chain, scene, ws, state, noun)
+            if made is None:
+                return None
+            state[noun] = made
+        if not made.count <= first <= final <= made.capacity:
+            return None
+        out = []
+        for kind, count in (("start", first), ("end", final)):
+            if kind == "end" and final == first:
+                out.append(None)
+                continue
+            path = ws.path("keyframes", f"scene_{scene['idx']}_v{scene['version']}_rig_{kind}.png")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(rig.compose(made, count))
+            out.append(path.read_bytes())
+        log.info("scene %s: rig frames %s -> %s %s", scene["idx"], first, final, noun)
+        return out[0], out[1]
+
+    def _build_rig(self, job, project, profile, client, chain, scene, ws, state: dict, noun: str):
+        """A rig from the latest earlier clip of the chain that ends checked and right
+        (no note) with a row of ``noun``; each clip is tried once per job."""
+        total = max((c[1] for s in chain if (c := planner.row_counts(s["visual_prompt"])) and c[2] == noun),
+                    default=0)
+        current = {s["id"]: s for s in self.repo.scenes(project["id"])}
+        tried = state.setdefault("_tried", set())
+        for s in reversed([current[c["id"]] for c in chain if c["idx"] < scene["idx"] and c["id"] in current]):
+            checks = planner.end_checks(s["visual_prompt"])
+            if (s["clip_status"] != "done" or s.get("clip_error") or not s.get("clip_file")
+                    or not ws.path(s["clip_file"]).exists() or not checks or checks["noun"] != noun
+                    or not checks["count"] or s["clip_file"] in tried):
+                continue
+            tried.add(s["clip_file"])
+            self._progress(job, self.repo.job(job["id"])["progress"],
+                           f"Scene {scene['idx'] + 1}: menyiapkan frame hitungan dari scene {s['idx'] + 1}…")
+            made = self._rig_from(job, profile, client, s, ws, checks, total)
+            if made is not None:
+                return made
+        return None
+
+    def _rig_from(self, job, profile, client, scene, ws, checks: dict, total: int):
+        clip = ws.path(scene["clip_file"])
+        try:
+            after = media.last_frame_png(clip, ws.path("frames", f"scene_{scene['idx']}_last.png"))
+            before = media.first_frame_png(clip, ws.path("frames", f"scene_{scene['idx']}_first.png"))
+            width, height = media.image_size(after)
+        except media.MediaError:
+            return None
+        container = next(iter(checks.get("visible") or []), None)
+        reply = self._ask_frame(job, profile, client, scene, after, planner.boxes_question(checks["noun"], container),
+                                delays=(5,))
+        if reply is None:
+            return None
+        boxes = rig.parse_boxes(reply.get("objects"), width, height)
+        if len(boxes) != checks["count"]:
+            log.info("scene %s rig: %s boxes for %s %s", scene["idx"], len(boxes), checks["count"], checks["noun"])
+            return None
+        holder = rig.parse_boxes([reply.get("container")], width, height)
+        surface = rig.parse_boxes([reply.get("surface")], width, height)
+        try:
+            made = rig.build(after.read_bytes(), before.read_bytes(), boxes, holder[0] if holder else None,
+                             total=total, surface=surface[0] if surface else None)
+            sample = ws.path("keyframes", f"rig_scene_{scene['idx']}_full.png")
+            sample.parent.mkdir(parents=True, exist_ok=True)
+            sample.write_bytes(rig.compose(made, made.capacity))
+        except rig.RigError as exc:
+            log.info("scene %s rig not usable: %s", scene["idx"], exc)
+            return None
+        # the fullest row it can draw must read right too (a wrong box shows here)
+        found = self._frame_problems(job, profile, client, scene, sample,
+                                     {"count": made.capacity, "noun": checks["noun"], "visible": []})
+        if found:
+            log.info("scene %s rig rejected: %s", scene["idx"], ", ".join(found))
+            return None
+        log.info("scene %s rig ready: %s -> %s %s", scene["idx"], made.count, made.capacity, checks["noun"])
+        return made
 
     # keyframes ----------------------------------------------------------
     def _keyframes(self, job, project, profile, client, preset, scene, ws, seed):

@@ -442,6 +442,9 @@ def _answers(fake_client, monkeypatch, *replies):
 
     def chat(self, model, messages, temperature=0.7, max_tokens=4096):
         if isinstance(messages[-1]["content"], list):
+            if "bounding box" in messages[-1]["content"][0]["text"]:
+                fake_client.calls.append(("boxes", ""))
+                return fake_client.boxes_reply
             fake_client.calls.append(("look", messages[-1]["content"][1]["image_url"]["url"][:22]))
             reply = queue.pop(0)
             if isinstance(reply, Exception):
@@ -863,6 +866,9 @@ def _keyframe_project(app, client, fake_client, monkeypatch, *replies):
 
     def chat(self, model, messages, temperature=0.7, max_tokens=4096):
         if isinstance(messages[-1]["content"], list):
+            if "bounding box" in messages[-1]["content"][0]["text"]:
+                fake_client.calls.append(("boxes", ""))
+                return fake_client.boxes_reply
             fake_client.calls.append(("look", ""))
             return queue.pop(0)
         return plain(self, model, messages, temperature, max_tokens)
@@ -994,3 +1000,64 @@ def test_rebuild_without_backup_just_clears(app, client, fake_client, monkeypatc
     _run_jobs(app)
     assert client.get(f"/api/projects/{pid}/backups").json() == []
     assert all(s["clip_status"] == "pending" for s in client.get(f"/api/projects/{pid}").json()["scenes"])
+
+
+_RIG_SHOTS = (
+    "Table; the camera stays still. START: exactly one large red apple on the table; a deep basket on a stool. "
+    "ACTION: the children look at the apple. END: exactly one large red apple on the table; a deep basket on a stool.",
+    "Table; the camera stays still. START: exactly one large red apple on the table; a deep basket on a stool. "
+    "ACTION: Rani takes one apple from the basket, places it right of the first. END: exactly two large red apples "
+    "in a row on the table; a deep basket on a stool.",
+    "Table; the camera stays still. START: exactly two large red apples in a row on the table; a deep basket on a "
+    "stool. ACTION: Rani takes one apple from the basket, places it right of the second. END: exactly three large "
+    "red apples in a row on the table; a deep basket on a stool.",
+)
+
+
+@needs_ffmpeg
+def test_counting_shots_after_a_checked_one_start_and_end_on_frames_drawn_with_the_exact_count(
+        app, client, fake_client, monkeypatch, settings):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    board = _bible_board(False, True, True)
+    for scene, shot in zip(board["scenes"], _RIG_SHOTS):
+        scene["visual_prompt"] = shot
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    monkeypatch.setattr(fake_client, "boxes_reply", '{"objects": [[500, 100, 560, 250]], "surface": null}')
+    # first clip's end, the rig's full row, second clip's end, third clip's end
+    _answers(fake_client, monkeypatch, '{"count":1}', '{"count":3}', '{"count":2}', '{"count":3}')
+    project = _setup(client, continuity=True)
+    pid = project["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls, fake_client.last_frames = [], []
+    _rendered(client, app, pid)
+    assert [c[4] for c in _videos(fake_client)] == [False, True, True]
+    assert fake_client.last_frames[0] is None
+    assert all(f and f[:8] == b"\x89PNG\r\n\x1a\n" for f in fake_client.last_frames[1:])
+    assert [c[0] for c in fake_client.calls].count("boxes") == 1  # one rig for the whole sequence
+    assert not [c for c in fake_client.calls if c[0] == "image"]  # no image model needed
+    keys = settings.projects_dir / str(pid) / "keyframes"
+    assert {p.name for p in keys.glob("scene_*_rig_*.png")} == {
+        "scene_1_v1_rig_start.png", "scene_1_v1_rig_end.png", "scene_2_v1_rig_start.png", "scene_2_v1_rig_end.png"}
+    # the third shot starts on the second one's drawn end, not on a frame of its clip
+    assert (keys / "scene_2_v1_rig_start.png").read_bytes() == (keys / "scene_1_v1_rig_end.png").read_bytes()
+
+
+@needs_ffmpeg
+def test_rig_waits_for_a_clip_whose_boxes_match_its_count(app, client, fake_client, monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    board = _bible_board(False, True, True)
+    for scene, shot in zip(board["scenes"], _RIG_SHOTS):
+        scene["visual_prompt"] = shot
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    # two boxes: wrong for the first shot (one apple), right for the second (two)
+    monkeypatch.setattr(fake_client, "boxes_reply", '{"objects": [[500, 100, 560, 250], [500, 300, 560, 450]]}')
+    # first clip's end, second clip's end, the rig's full row, third clip's end
+    _answers(fake_client, monkeypatch, '{"count":1}', '{"count":2}', '{"count":3}', '{"count":3}')
+    project = _setup(client, continuity=True)
+    client.post(f"/api/projects/{project['id']}/plan")
+    _run_jobs(app)
+    fake_client.last_frames = []
+    _rendered(client, app, project["id"])
+    assert fake_client.last_frames[:2] == [None, None]  # second shot: plain seeded clip, as before
+    assert fake_client.last_frames[2][:8] == b"\x89PNG\r\n\x1a\n"

@@ -54,6 +54,7 @@ class FakeClient:
     fail_video_times: int = 0
     fail_prompts: tuple = ()  # prompts containing one of these fail permanently (non-retryable)
     last_frames: list = []  # last_png of every video call, in order
+    boxes_reply: str = '{"objects": []}'  # the vision model's boxes for the counting rig (none: no rig)
 
     def __init__(self, base_url: str, api_key: str):
         self.base_url, self.api_key = base_url, api_key
@@ -122,6 +123,7 @@ def fake_client():
     FakeClient.fail_video_times = 0
     FakeClient.fail_prompts = ()
     FakeClient.last_frames = []
+    FakeClient.boxes_reply = '{"objects": []}'
     return FakeClient
 
 
