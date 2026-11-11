@@ -126,3 +126,21 @@ def test_project_list_summary_and_music_file(client):
     music = client.get(f"/api/projects/{project['id']}/files/music.mp3")
     assert music.status_code == 200 and music.headers["content-type"] == "audio/mpeg"
     assert client.get(f"/api/projects/{project['id']}/files/music.exe").status_code == 404
+
+
+def test_storyboard_reports_prompt_budget_and_refuses_a_prompt_too_long_for_the_model(client):
+    login(client)
+    profile = _profile(client, video_model="dreamina/seedance-2.0-mini")
+    bible = {"bible_style": "s" * 600, "bible_character": "c" * 1200, "bible_world": "w" * 1200, "continuity": True}
+    project = client.post("/api/projects", json={"prompt": "apel", "profile_id": profile["id"], "options": bible}).json()
+    ok = client.put(f"/api/projects/{project['id']}/scenes", json={"scenes": [
+        {"visual_prompt": "She waves", "duration": 5}, {"visual_prompt": "She adds an apple", "duration": 5, "continues": True}]})
+    assert ok.status_code == 200, ok.text
+    detail = ok.json()
+    assert detail["prompt_limit"] == 4000
+    second = detail["scenes"][1]
+    assert second["prompt_overhead"] > second["prompt_min_overhead"] > 3000
+    too_long = client.put(f"/api/projects/{project['id']}/scenes", json={"scenes": [
+        {"visual_prompt": "She waves", "duration": 5},
+        {"visual_prompt": "x " * 600, "duration": 5, "continues": True}]})
+    assert too_long.status_code == 400 and "Scene 2" in too_long.json()["error"]

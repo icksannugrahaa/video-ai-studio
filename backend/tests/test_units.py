@@ -600,3 +600,49 @@ def test_sung_shot_times_each_placing_to_its_number():
     assert planner.SONG_PLACING in planner.clip_prompt(options, placing, sung='A song is sung (5s "Dua apel").')
     assert planner.SONG_PLACING not in planner.clip_prompt(options, placing)
     assert planner.SONG_PLACING not in planner.clip_prompt(options, "Table. START: a. ACTION: they sway. END: b.", sung="A song.")
+
+
+def test_prompt_limit_follows_the_video_model():
+    assert planner.prompt_limit("dreamina/seedance-2.0-mini") == 4000
+    assert planner.prompt_limit("seedance-2.0-fast") == 4000
+    assert planner.prompt_limit("dreamina/seedance-2.5") == 15000
+    assert planner.prompt_limit("veo-3") is None and planner.prompt_limit("") is None
+
+
+def test_over_limit_prompt_drops_optional_guidance_in_order():
+    options = {"bible_style": "Soft 3D", "bible_character": "Bu Rani, teal blouse"}
+    shot = "Same table; locked-off camera. START: three apples. ACTION: she places a fourth apple. END: four apples."
+    sung = 'A song is sung during this shot (0s "Empat apel merah").'
+    parts = planner.clip_prompt_parts(options, shot, sung=sung, seeded=True, previous="START: a. ACTION: b. END: three apples")
+    full, essential = planner.prompt_sizes(parts)
+    assert planner.clip_prompt(options, shot, sung=sung, seeded=True, previous="START: a. ACTION: b. END: three apples") \
+        == planner.fit_prompt(parts, None) and len(planner.fit_prompt(parts, None)) == full
+    # Shot spells out START, so no "previous shot" piece: the camera lock goes first, then the craft rules.
+    no_camera = planner.fit_prompt(parts, full - 1)
+    assert planner.CAMERA_LOCK not in no_camera and planner.SHOT_CRAFT in no_camera
+    no_craft = planner.fit_prompt(parts, full - len(planner.CAMERA_LOCK) - 2)
+    assert planner.SHOT_CRAFT not in no_craft and planner.SONG_PLACING in no_craft
+    bare = planner.fit_prompt(parts, essential)
+    assert len(bare) == essential and sung in bare and planner.SEEDED_SHOT in bare and "Shot: " in bare
+    cut = planner.fit_prompt(parts, essential - 10)
+    assert len(cut) <= essential - 10 and not cut.endswith(" ")
+
+
+def test_previous_shot_note_is_dropped_before_the_craft_rules():
+    options = {"bible_style": "Soft 3D"}
+    parts = planner.clip_prompt_parts(options, "She adds an apple", seeded=True, previous="Three apples on the table")
+    full = planner.prompt_sizes(parts)[0]
+    trimmed = planner.fit_prompt(parts, full - 1)
+    assert "previous shot" not in trimmed and planner.SHOT_CRAFT in trimmed
+
+
+def test_scene_prompt_sizes_match_what_the_render_sends():
+    options = {"bible_style": "Soft 3D", "continuity": True, "music_style": "song", "music_mode": "external",
+               "lyrics": "[0:00] Satu apel\n[0:05] Dua apel"}
+    scenes = [{"idx": 0, "visual_prompt": "She waves", "duration": 5, "continues": False},
+              {"idx": 1, "visual_prompt": "She places an apple", "duration": 5, "continues": True}]
+    sizes = planner.scene_prompt_sizes(options, scenes)
+    sung = planner.sung_direction(options, 5.0, 10.0)
+    sent = planner.clip_prompt(options, "She places an apple", sung=sung, seeded=True, previous="She waves")
+    assert sizes[1][0] == len(sent) and sizes[1][1] < sizes[1][0]
+    assert sizes[0][0] == len(planner.clip_prompt(options, "She waves", sung=planner.sung_direction(options, 0.0, 5.0)))

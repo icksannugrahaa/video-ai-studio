@@ -6,7 +6,7 @@ import JobCard from '../components/editor/JobCard.jsx';
 import MusicPanel from '../components/editor/MusicPanel.jsx';
 import Player from '../components/editor/Player.jsx';
 import SettingsPanel from '../components/editor/SettingsPanel.jsx';
-import Storyboard from '../components/editor/Storyboard.jsx';
+import Storyboard, { promptBudget } from '../components/editor/Storyboard.jsx';
 import SummaryCard from '../components/editor/SummaryCard.jsx';
 import { isActive, sceneState, totalSeconds } from '../components/editor/shared.js';
 import { useT } from '../i18n.jsx';
@@ -234,6 +234,12 @@ export default function ProjectEditor({ projectId }) {
     if (bad >= 0) {
       setSelected(bad);
       toast(t('editor.sceneInvalid', { n: bad + 1 }), 'bad');
+      return;
+    }
+    const tooLong = scenes.findIndex((s) => promptBudget(s, project.prompt_limit)?.level === 'bad');
+    if (tooLong >= 0) {
+      setSelected(tooLong);
+      toast(t('editor.scenePromptTooLong', { n: tooLong + 1, max: project.prompt_limit }), 'bad');
       return;
     }
     // The server matches scenes by position: a changed visual/duration at an index throws away that clip.

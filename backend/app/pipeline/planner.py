@@ -261,41 +261,87 @@ def link_shots(scenes: list[dict]) -> None:
             scene["visual_prompt"] = _SHOT_RE.sub(lambda _: f"START: {end.group(1).strip()} ", scene["visual_prompt"], count=1)
 
 
-def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False, previous: str = "") -> str:
-    """Final prompt for one clip: fixed bible + the shot (+ in song mode what is
-    sung during it, + for a seeded clip the order to continue its image and,
-    when the shot does not spell out its START, what the previous shot showed).
-    Projects planned before the bible existed have empty bible fields and keep
-    their prompt."""
+# Longest prompt each video model accepts (Dreamina ``max_prompt_length``, checked
+# 2026-11-11). Past it Dreamina keeps Generate disabled and the clip never starts,
+# so the optional guidance of a long prompt is dropped first. Unknown models: no cap.
+PROMPT_LIMITS = (("seedance-2.5", 15000), ("seedance-2.0", 4000))
+
+# Drop order when a prompt is over the cap: the highest rank goes first. What the
+# seed image already shows goes before the general craft rules; rank 0 always stays.
+_DROP_PREVIOUS, _DROP_CAMERA, _DROP_CRAFT, _DROP_SONG_PLACING = 4, 3, 2, 1
+
+
+def prompt_limit(video_model: str) -> int | None:
+    name = (video_model or "").lower()
+    return next((limit for key, limit in PROMPT_LIMITS if key in name), None)
+
+
+def clip_prompt_parts(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False,
+                      previous: str = "") -> list[tuple[str, int]]:
+    """The pieces of :func:`clip_prompt` with their drop rank (0 = always kept)."""
     style = (options.get("bible_style") or "").strip().rstrip(".")
     character = (options.get("bible_character") or "").strip().rstrip(".")
     world = (options.get("bible_world") or "").strip().rstrip(".")
     shot = (visual_prompt or "").strip()
     if not (style or character or world):
-        return f"{shot} {sung}".strip()
+        return [(text, 0) for text in (shot, sung.strip()) if text]
     parts = []
     if style:
-        parts.append(f"{style}.")
+        parts.append((f"{style}.", 0))
     if character:
-        parts.append(f"Main character, identical in every shot: {character}.")
+        parts.append((f"Main character, identical in every shot: {character}.", 0))
     if world:
-        parts.append(f"Setting: {world}.")
-    parts.append(f"Shot: {shot}")
+        parts.append((f"Setting: {world}.", 0))
+    parts.append((f"Shot: {shot}", 0))
     if seeded:
         if previous and "START:" not in shot:
             end = _END_RE.search(previous)
-            parts.append(f"It continues directly from the previous shot, which showed: {(end.group(1) if end else previous).strip()}")
-        parts.append(SEEDED_SHOT)
+            parts.append((f"It continues directly from the previous shot, which showed: "
+                          f"{(end.group(1) if end else previous).strip()}", _DROP_PREVIOUS))
+        parts.append((SEEDED_SHOT, 0))
     if sung:
-        parts.append(sung)
+        parts.append((sung, 0))
         action = _ACTION_RE.search(shot)
         if action and re.search(r"\b(?:places?|puts?|sets?)\b", action.group(1), re.I):
-            parts.append(SONG_PLACING)
+            parts.append((SONG_PLACING, _DROP_SONG_PLACING))
     if _STILL_CAMERA_RE.search(shot.split("START:")[0]):
-        parts.append(CAMERA_LOCK)
-    parts.append(SHOT_CRAFT)
-    parts.append("No on-screen text, captions or watermarks.")
-    return " ".join(parts)
+        parts.append((CAMERA_LOCK, _DROP_CAMERA))
+    parts.append((SHOT_CRAFT, _DROP_CRAFT))
+    parts.append(("No on-screen text, captions or watermarks.", 0))
+    return parts
+
+
+def _joined(parts: list[tuple[str, int]]) -> str:
+    return " ".join(text for text, _ in parts)
+
+
+def prompt_sizes(parts: list[tuple[str, int]]) -> tuple[int, int]:
+    """(full length, length with every optional piece dropped)."""
+    return len(_joined(parts)), len(_joined([p for p in parts if not p[1]]))
+
+
+def fit_prompt(parts: list[tuple[str, int]], limit: int | None) -> str:
+    """Join the pieces, dropping optional ones (highest rank first) until it fits
+    ``limit``; a prompt still too long is cut at a word as a last resort."""
+    for rank in sorted({r for _, r in parts if r}, reverse=True):
+        if not limit or len(_joined(parts)) <= limit:
+            break
+        parts = [p for p in parts if p[1] != rank]
+    text = _joined(parts)
+    if limit and len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0]
+    return text
+
+
+def clip_prompt(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False, previous: str = "",
+                limit: int | None = None) -> str:
+    """Final prompt for one clip: fixed bible + the shot (+ in song mode what is
+    sung during it, + for a seeded clip the order to continue its image and,
+    when the shot does not spell out its START, what the previous shot showed).
+    Projects planned before the bible existed have empty bible fields and keep
+    their prompt. ``limit`` (see :func:`prompt_limit`) keeps it within what the
+    video model accepts."""
+    return fit_prompt(clip_prompt_parts(options, visual_prompt, sung, seeded, previous), limit)
 
 
 _BPM_RE = re.compile(r"(\d{2,3})\s*BPM", re.I)
@@ -657,3 +703,29 @@ def parse_lyrics(lyrics: str, total: float, max_line: float = 6.0) -> list[tuple
         nxt = timed[i + 1][0] if i + 1 < len(timed) else total
         cues.append((round(start, 3), round(min(nxt, start + max_line, total), 3), text))
     return cues
+
+
+def is_song(options: dict) -> bool:
+    return options.get("music_style") == "song" and options.get("music_mode") != "none"
+
+
+def scene_prompt_sizes(options: dict, scenes: list[dict]) -> list[tuple[int, int]]:
+    """Per scene (in ``idx`` order): ``(full, essential)`` length of the clip prompt
+    the render would send — essential = with every optional piece dropped. An
+    estimate for the editor: song timing comes from the lyrics and planned lengths
+    (the render may also use the music file), and a scene counts as seeded when
+    continuity would chain it."""
+    ordered = sorted(scenes, key=lambda s: s["idx"])
+    continuity, bible = bool(options.get("continuity")), has_bible(options)
+    lengths = [float(s.get("duration") or 0) for s in ordered]
+    if is_song(options):
+        lengths = song_lengths(ordered, options.get("lyrics") or "") or lengths
+    sizes, start = [], 0.0
+    for i, scene in enumerate(ordered):
+        sung = sung_direction(options, start, start + lengths[i]) if is_song(options) else ""
+        start += lengths[i]
+        seeded = continuity and i > 0 and (bool(scene.get("continues")) or not bible)
+        parts = clip_prompt_parts(options, scene["visual_prompt"], sung=sung, seeded=seeded,
+                                  previous=ordered[i - 1]["visual_prompt"] if i else "")
+        sizes.append(prompt_sizes(parts))
+    return sizes
