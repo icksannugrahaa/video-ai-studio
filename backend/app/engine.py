@@ -31,6 +31,11 @@ CLIP_ATTEMPTS = 3
 # Back-off before retry 2 and 3: upstream rate limits / busy queues need time,
 # instant retries just fail the same way (seen live: CodeBuddy 429 bursts).
 CLIP_RETRY_DELAYS = (30, 90)
+# Back-off before asking the chat model about a last frame again: a skipped check let a
+# wrong first clip seed a whole chain (router accounts in cooldown, seen live).
+END_CHECK_DELAYS = (20, 60)
+UNCHECKED_NOTE = ("Frame terakhir belum dicek: model chat tidak menjawab. Periksa clip ini, "
+                  "scene berikutnya dimulai dari frame terakhirnya.")
 NARRATION_TAIL = 0.4  # seconds of breathing room after the last sentence
 SEAM_DISSOLVE = 0.2  # seconds, continuing shots
 GAIN_LIMIT = 0.15  # most a chain's colour may be corrected
@@ -502,22 +507,37 @@ class Engine:
         except media.MediaError:
             return False
 
-    def _end_state_problems(self, profile, client, scene, clip: Path, checks: dict | None) -> list[str]:
+    def _end_state_problems(self, job, profile, client, scene, clip: Path, checks: dict | None) -> list[str] | None:
         """What the clip's last frame lacks compared to its END. It seeds the next
-        clip, so whatever is lost here stays lost. A failed check is no finding."""
+        clip, so whatever is lost here stays lost. ``None`` when the chat model gave
+        no usable answer after a few tries: unknown, never "fine"."""
         if not checks or not profile["chat_model"]:
             return []
         frame = clip.with_name(f"{clip.stem}_end.jpg")
         try:
             media.last_frame_png(clip, frame)
             image = "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
-            reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
-                {"type": "text", "text": planner.end_question(checks)},
-                {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
-            return planner.end_problems(checks, planner.extract_json(reply))
-        except (ProviderError, media.MediaError, planner.PlanError):
-            log.warning("scene %s end state check skipped", scene["idx"])
-            return []
+        except media.MediaError:
+            log.warning("scene %s end state check skipped: last frame unreadable", scene["idx"])
+            frame.unlink(missing_ok=True)
+            return None
+        try:
+            for attempt in range(len(END_CHECK_DELAYS) + 1):
+                if attempt:
+                    self._sleep(job, END_CHECK_DELAYS[attempt - 1])
+                try:
+                    reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
+                        {"type": "text", "text": planner.end_question(checks)},
+                        {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
+                    return planner.end_problems(checks, planner.extract_json(reply))
+                except ProviderError as exc:
+                    if exc.status == 499:
+                        raise
+                    reason = f"provider {exc.status}"
+                except planner.PlanError:
+                    reason = "no JSON answer"
+                log.warning("scene %s end state check attempt %s failed (%s)", scene["idx"], attempt + 1, reason)
+            return None
         finally:
             frame.unlink(missing_ok=True)
 
@@ -525,17 +545,23 @@ class Engine:
         """A clip that left its seed or ends without what its shot promises gets one
         more (billed) try; the better of the two stays and what is still wrong is
         shown on the scene. The first clip is already saved, so a failed retake
-        costs nothing."""
+        costs nothing. A last frame the chat model could not check is flagged on
+        the scene (no retake is billed on a guess)."""
         prev = self._previous_clip(project, scene, ws)
         scenes = self.repo.scenes(project["id"])
         first = next(s for s in scenes if s["id"] == scene["id"])
         checks = planner.sequence_checks(scenes, first)
 
-        def flaws(clip: Path) -> tuple[list[str], float]:
+        def flaws(clip: Path) -> tuple[list[str] | None, float]:
             gap = media.seam_gap(prev, clip) if seed is not None and prev else 0.0
-            return self._end_state_problems(profile, client, scene, clip, checks), gap
+            return self._end_state_problems(job, profile, client, scene, clip, checks), gap
 
-        left: list[str] = []
+        def note(found: list[str] | None) -> str | None:
+            if found is None:
+                return UNCHECKED_NOTE
+            return f"Frame terakhir: {', '.join(found)}"[:300] if found else None
+
+        left: list[str] | None = []
         try:
             left, gap = flaws(ws.path(first["clip_file"]))
             if not left and gap <= media.SEAM_BREAK:
@@ -559,8 +585,7 @@ class Engine:
             log.warning("scene %s retake unreadable", scene["idx"])
             return
         finally:
-            self.repo.update_scene(scene["id"], clip_status="done",
-                                   clip_error=f"Frame terakhir: {', '.join(left)}"[:300] if left else None)
+            self.repo.update_scene(scene["id"], clip_status="done", clip_error=note(left))
         loser = first["clip_file"] if closer else name
         if closer:
             self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)

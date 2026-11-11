@@ -24,6 +24,7 @@ needs_ffmpeg = pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg not installed")
 def _no_retry_delay(monkeypatch):
     import app.engine
     monkeypatch.setattr(app.engine, "CLIP_RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(app.engine, "END_CHECK_DELAYS", (0, 0))
 
 
 @pytest.fixture

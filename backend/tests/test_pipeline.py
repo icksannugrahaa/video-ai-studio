@@ -6,7 +6,9 @@ import dataclasses
 
 import pytest
 
+from app import engine as app_engine
 from app.pipeline import media
+from app.providers import ProviderError
 from tests.conftest import login, needs_ffmpeg
 
 
@@ -441,7 +443,10 @@ def _answers(fake_client, monkeypatch, *replies):
     def chat(self, model, messages, temperature=0.7, max_tokens=4096):
         if isinstance(messages[-1]["content"], list):
             fake_client.calls.append(("look", messages[-1]["content"][1]["image_url"]["url"][:22]))
-            return queue.pop(0)
+            reply = queue.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
         return plain(self, model, messages, temperature, max_tokens)
 
     monkeypatch.setattr(fake_client, "chat", chat)
@@ -477,15 +482,33 @@ def test_end_state_still_wrong_after_the_retake_is_shown_on_the_scene(app, clien
 
 
 @needs_ffmpeg
-def test_unreadable_answer_bills_no_retake(app, client, fake_client, monkeypatch):
+def test_unreadable_answer_bills_no_retake_but_flags_the_scene(app, client, fake_client, monkeypatch):
     _basket_board(fake_client, monkeypatch)
-    _answers(fake_client, monkeypatch, "maaf, saya tidak bisa melihat gambar")
+    _answers(fake_client, monkeypatch, *["maaf, saya tidak bisa melihat gambar"] * 3)
     pid = _setup(client, continuity=True)["id"]
     client.post(f"/api/projects/{pid}/plan")
     _run_jobs(app)
     fake_client.calls = []
     scene = _rendered(client, app, pid)["scenes"][0]
-    assert len(_videos(fake_client)) == 1 and not scene["clip_error"]
+    assert len(_videos(fake_client)) == 1
+    assert len([c for c in fake_client.calls if c[0] == "look"]) == 3  # asked again before giving up
+    assert scene["clip_status"] == "done" and scene["clip_error"] == app_engine.UNCHECKED_NOTE
+
+
+@needs_ffmpeg
+def test_end_check_asks_again_after_a_provider_error(app, client, fake_client, monkeypatch):
+    # Seen live: the chat model's accounts were all cooling down, the check was
+    # skipped and a first clip with three extra apples seeded the whole chain.
+    _basket_board(fake_client, monkeypatch)
+    _answers(fake_client, monkeypatch, ProviderError("busy", status=404),
+             '{"count":2,"visible":{"basket":false}}', '{"count":2,"visible":{"basket":true}}')
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2
+    assert scene["clip_file"].endswith("_retake.mp4") and not scene["clip_error"]
 
 
 @needs_ffmpeg

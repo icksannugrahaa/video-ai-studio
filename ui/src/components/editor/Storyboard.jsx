@@ -147,7 +147,9 @@ function SceneCard({ scene, index, count, start, project, open, selected, busy, 
           )}
           {scene.clip_error && state !== 'failed' && (
             <div className="alert warn"><Icon name="alert" /><div>
-              <strong>{t('sb.clipEndWarning')}</strong> {scene.clip_error}
+              {/^Frame terakhir belum dicek/.test(scene.clip_error)
+                ? <><strong>{t('sb.clipEndUnchecked')}</strong> {t('sb.clipEndUncheckedHint')}</>
+                : <><strong>{t('sb.clipEndWarning')}</strong> {scene.clip_error}</>}
             </div></div>
           )}
           <label className="field"><span>{t('sb.visualLabel')} <span className="hint">— {t('sb.visualHint')}</span></span>

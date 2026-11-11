@@ -86,8 +86,10 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   from the object before it ("directly to the right of the third apple"), never "the next empty spot". The first shot of
   a sequence gives every person's place on screen and nobody sits or stands between the camera and the objects (e.g. one
   child at each end of the table, turned three-quarters toward the camera). The first shot of a counting sequence leaves visible empty space, in the
-  frame and on the surface, for the final count (e.g. a long table with the row starting at its far left), and ACTION
-  names the free spot for each new object. Vary shot sizes between sequences
+  frame and on the surface, for the final count (e.g. a long table with the row starting at its far left, "the right half of the table is
+  bare"), and ACTION names the free spot for each new object. Describe that space only as bare surface: never name
+  the objects that will fill it or their final count ("room for five apples"), because the video model draws every
+  object a shot names, right away. Vary shot sizes between sequences
   (wide to establish, then medium, then a close detail) so the edit has rhythm, unless a rule below fixes the camera.
   Refer to the character as "the character" (or
   the cast by their names); do NOT re-describe the character, the world or the style (the bible is added automatically). Keep the time of day
@@ -156,6 +158,19 @@ _END_RE = re.compile(r"\bEND:\s*(.*)$", re.S)
 _ACTION_RE = re.compile(r"\bACTION:\s*(.*?)\s*(?=\bEND:)", re.S)
 _SOURCE_RE = re.compile(r"\b(?:lifts?|takes?|picks?|pulls?|grabs?|brings?|draws?)\b[^.;]*?\bfrom (?:(?:a|an|the) )?"
                         r"([a-z][a-z -]*?)( (?:at|on|in|beside|near|by|under|behind) [^,;.]+)?(?=[,;.]|$)", re.I)
+
+
+_FUTURE_ROOM_RE = re.compile(
+    r"\b(?:room|space)\s+for\s+(?:(?:the|all|up to|exactly)\s+)?(?:\d+|" + "|".join(
+        "one two three four five six seven eight nine ten eleven twelve more new remaining future later other "
+        "additional extra".split()) + r")\b(?:\s+[a-z-]+){0,2}?\s+[a-z-]+s\b", re.I)
+
+
+def drop_future_objects(shot: str) -> str:
+    """"leave room for five apples" names objects that are not there yet, and the
+    video model draws every object it reads at once (seen live: three apples too
+    many in the first shot, carried into every seeded shot after it)."""
+    return _FUTURE_ROOM_RE.sub("empty space", shot)
 
 
 def _is_placed(text: str, word: str) -> bool:
@@ -282,7 +297,7 @@ def clip_prompt_parts(options: dict, visual_prompt: str, sung: str = "", seeded:
     style = (options.get("bible_style") or "").strip().rstrip(".")
     character = (options.get("bible_character") or "").strip().rstrip(".")
     world = (options.get("bible_world") or "").strip().rstrip(".")
-    shot = (visual_prompt or "").strip()
+    shot = drop_future_objects((visual_prompt or "").strip())
     if not (style or character or world):
         return [(text, 0) for text in (shot, sung.strip()) if text]
     parts = []

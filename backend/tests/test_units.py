@@ -646,3 +646,16 @@ def test_scene_prompt_sizes_match_what_the_render_sends():
     sent = planner.clip_prompt(options, "She places an apple", sung=sung, seeded=True, previous="She waves")
     assert sizes[1][0] == len(sent) and sizes[1][1] < sizes[1][0]
     assert sizes[0][0] == len(planner.clip_prompt(options, "She waves", sung=planner.sung_direction(options, 0.0, 5.0)))
+
+
+def test_room_for_objects_not_there_yet_is_not_sent_to_the_video_model():
+    # Seen live: "leave room for five separated apples" drew three extra apples at once.
+    shot = ("Classroom table. START: exactly one large red apple. ACTION: apples remain untouched; "
+            "leave room for five separated apples extending rightward. END: exactly one large red apple.")
+    options = {"bible_style": "3D", "bible_world": "a classroom"}
+    prompt = planner.clip_prompt(options, shot)
+    assert "five separated apples" not in prompt and "leave empty space extending rightward" in prompt
+    assert planner.drop_future_objects("keep space for the remaining apples on the right") == \
+        "keep empty space on the right"
+    for kept in ("room for his hands", "space for the final count", "exactly four apples in a basket"):
+        assert planner.drop_future_objects(kept) == kept
