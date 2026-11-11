@@ -5,7 +5,7 @@ import { Button, CopyButton, Empty, timeAgo, useDialog, useToast } from '../comp
 import { useT, useI18n } from '../i18n.jsx';
 
 const EMPTY = { name: '', base_url: 'https://ai.sandroid.works', api_key: '', chat_model: '', video_model: '',
-  tts_model: '', tts_voice: '', clip_seconds: 5 };
+  tts_model: '', image_model: '', tts_voice: '', clip_seconds: 5 };
 
 function groupByProvider(models, noPrefix) {
   const groups = new Map();
@@ -120,7 +120,7 @@ function ProfileForm({ initial, onSaved, onCancel }) {
             <Button type="button" icon="refresh" loading={loadingModels} disabled={!canProbe} onClick={loadModels}>
               {models ? t('settings.reloadModels') : t('settings.loadModels')}
             </Button>
-            {models && <span className="faint small">Chat {models.chat.length} · Video {models.video.length} · TTS {models.tts.length}</span>}
+            {models && <span className="faint small">Chat {models.chat.length} · Video {models.video.length} · TTS {models.tts.length} · Image {(models.image || []).length}</span>}
           </div>
           {modelError && <div className="alert bad"><Icon name="alert" /><div>{modelError}</div></div>}
         </div></div>
@@ -134,6 +134,8 @@ function ProfileForm({ initial, onSaved, onCancel }) {
               options={models?.video} loading={loadingModels} onChange={set('video_model')} />
             <ModelSelect icon="mic" label={t('common.tts')} hint={t('settings.modelTtsHint')} value={form.tts_model}
               options={models?.tts} loading={loadingModels} onChange={set('tts_model')} />
+            <ModelSelect icon="layers" label={t('common.image')} hint={t('settings.modelImageHint')} value={form.image_model}
+              options={models?.image} loading={loadingModels} onChange={set('image_model')} />
           </div>
         </div></div>
 
@@ -222,6 +224,7 @@ export default function Settings() {
                   <span>Chat <b>{p.chat_model || '—'}</b></span>
                   <span>Video <b>{p.video_model || '—'}</b></span>
                   <span>TTS <b>{p.tts_model || '—'}</b></span>
+                  {p.image_model && <span>Image <b>{p.image_model}</b></span>}
                 </div>
               </div>
               <div className="row">

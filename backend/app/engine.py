@@ -34,6 +34,7 @@ CLIP_RETRY_DELAYS = (30, 90)
 # Back-off before asking the chat model about a last frame again: a skipped check let a
 # wrong first clip seed a whole chain (router accounts in cooldown, seen live).
 END_CHECK_DELAYS = (20, 60)
+KEYFRAME_TRIES = 3  # image-model attempts per keyframe before the clip goes without it
 UNCHECKED_NOTE = ("Frame terakhir belum dicek: model chat tidak menjawab. Periksa clip ini, "
                   "scene berikutnya dimulai dari frame terakhirnya.")
 NARRATION_TAIL = 0.4  # seconds of breathing room after the last sentence
@@ -411,8 +412,9 @@ class Engine:
                 with lock:
                     state["running"] += 1
                 try:
-                    self._generate_one(job, project, profile, client, preset, scene, ws, seed)
-                    self._retake_broken(job, project, profile, client, preset, scene, ws, seed)
+                    seed, last = self._keyframes(job, project, profile, client, preset, scene, ws, seed)
+                    self._generate_one(job, project, profile, client, preset, scene, ws, seed, last)
+                    self._retake_broken(job, project, profile, client, preset, scene, ws, seed, last)
                 except BaseException:
                     stop.set()
                     raise
@@ -443,13 +445,13 @@ class Engine:
         if errors:
             raise next((e for e in errors if isinstance(e, JobCanceled)), errors[0])
 
-    def _generate_one(self, job, project, profile, client, preset, scene, ws, seed) -> None:
+    def _generate_one(self, job, project, profile, client, preset, scene, ws, seed, last=None) -> None:
         self.repo.update_scene(scene["id"], clip_status="running", clip_error=None)
         last_error = None
         started = time.monotonic()  # generation time shown per clip (includes retries/back-off)
         for attempt in range(1, CLIP_ATTEMPTS + 1):
             try:
-                video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
+                video = self._request_clip(job, project, profile, client, preset, scene, ws, seed, last)
                 name = f"clips/scene_{scene['idx']}_v{scene['version']}.{video.ext}"
                 ws.path(name).write_bytes(video.data)
                 media.duration(ws.path(name))  # validate it is a real video
@@ -475,10 +477,12 @@ class Engine:
         self.repo.update_scene(scene["id"], clip_status="failed", clip_error=(last_error or "gagal")[:300])
         raise JobFailed(f"Scene {scene['idx'] + 1} gagal: {last_error}")
 
-    def _request_clip(self, job, project, profile, client, preset, scene, ws, seed):
+    def _request_clip(self, job, project, profile, client, preset, scene, ws, seed, last=None):
         parts = planner.clip_prompt_parts(project["options"], scene["visual_prompt"],
                                           sung=self._sung_during(project, scene, ws), seeded=seed is not None,
-                                          previous=self._previous_shot(project, scene))
+                                          previous=self._previous_shot(project, scene),
+                                          correction=scene.get("correction") or "",
+                                          ends_on_image=last is not None and seed is not None)
         limit = planner.prompt_limit(profile["video_model"])
         prompt = planner.fit_prompt(parts, limit)
         full = planner.prompt_sizes(parts)[0]
@@ -487,7 +491,7 @@ class Engine:
         return client.generate_video(
             profile["video_model"], prompt,
             seconds=self._clip_seconds(project, profile, scene, ws),
-            aspect_ratio=preset["model_aspect"], image_png=seed,
+            aspect_ratio=preset["model_aspect"], image_png=seed, last_png=last if seed is not None else None,
             enable_audio=bool(project["options"].get("keep_clip_audio")),
             should_cancel=lambda: self.repo.job_status(job["id"]) == "canceled",
         )
@@ -516,32 +520,118 @@ class Engine:
         frame = clip.with_name(f"{clip.stem}_end.jpg")
         try:
             media.last_frame_png(clip, frame)
-            image = "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
         except media.MediaError:
             log.warning("scene %s end state check skipped: last frame unreadable", scene["idx"])
             frame.unlink(missing_ok=True)
             return None
         try:
-            for attempt in range(len(END_CHECK_DELAYS) + 1):
-                if attempt:
-                    self._sleep(job, END_CHECK_DELAYS[attempt - 1])
-                try:
-                    reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
-                        {"type": "text", "text": planner.end_question(checks)},
-                        {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
-                    return planner.end_problems(checks, planner.extract_json(reply))
-                except ProviderError as exc:
-                    if exc.status == 499:
-                        raise
-                    reason = f"provider {exc.status}"
-                except planner.PlanError:
-                    reason = "no JSON answer"
-                log.warning("scene %s end state check attempt %s failed (%s)", scene["idx"], attempt + 1, reason)
-            return None
+            return self._frame_problems(job, profile, client, scene, frame, checks)
         finally:
             frame.unlink(missing_ok=True)
 
-    def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed) -> None:
+    def _frame_problems(self, job, profile, client, scene, frame: Path, checks: dict | None) -> list[str] | None:
+        """Ask the chat model what one frame shows against ``checks``; ``None`` when
+        it gave no usable answer after a few tries."""
+        if not checks or not profile["chat_model"]:
+            return []
+        mime = "image/png" if frame.suffix == ".png" else "image/jpeg"
+        image = f"data:{mime};base64," + base64.b64encode(frame.read_bytes()).decode("ascii")
+        for attempt in range(len(END_CHECK_DELAYS) + 1):
+            if attempt:
+                self._sleep(job, END_CHECK_DELAYS[attempt - 1])
+            try:
+                reply = client.chat(profile["chat_model"], [{"role": "user", "content": [
+                    {"type": "text", "text": planner.end_question(checks)},
+                    {"type": "image_url", "image_url": {"url": image}}]}], temperature=0)
+                return planner.end_problems(checks, planner.extract_json(reply))
+            except ProviderError as exc:
+                if exc.status == 499:
+                    raise
+                reason = f"provider {exc.status}"
+            except planner.PlanError:
+                reason = "no JSON answer"
+            log.warning("scene %s frame check attempt %s failed (%s)", scene["idx"], attempt + 1, reason)
+        return None
+
+    # keyframes ----------------------------------------------------------
+    def _keyframes(self, job, project, profile, client, preset, scene, ws, seed):
+        """(first, last) frame for the clip. With an image model, a shot with no frame
+        to start from gets a checked first frame drawn from its START, and a counting
+        step gets a checked last frame edited from its first one, so the video model
+        only moves between two right pictures. Anything that fails → the plain clip."""
+        if not profile.get("image_model"):
+            return seed, None
+        shot, opts = scene["visual_prompt"], project["options"]
+        if seed is None:
+            checks = planner.start_checks(shot)
+            if not (checks and planner.has_bible(opts)):
+                return None, None
+            width, height = preset["width"], preset["height"]
+            size = "1536x1024" if width > height else "1024x1536" if height > width else "1024x1024"
+            seed = self._keyframe(job, profile, client, scene, ws, "start", checks, (width, height),
+                                  lambda: client.generate_image(profile["image_model"],
+                                                                planner.start_frame_prompt(opts, shot), size=size))
+            if seed is None:
+                return None, None
+        if not planner.moves_objects(shot):
+            return seed, None
+        checks = planner.sequence_checks(self.repo.scenes(project["id"]), scene)
+        if not checks:
+            return seed, None
+        frame = ws.path("keyframes", f"scene_{scene['idx']}_seed.png")
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(seed)
+        try:
+            size = media.image_size(frame)
+        except media.MediaError:
+            return seed, None
+        last = self._keyframe(job, profile, client, scene, ws, "end", checks, size,
+                              lambda: client.edit_image(profile["image_model"], seed,
+                                                        planner.end_frame_prompt(opts, shot)))
+        return seed, last
+
+    def _keyframe(self, job, profile, client, scene, ws, kind: str, checks: dict, size: tuple[int, int],
+                  make) -> bytes | None:
+        """One keyframe, made at most ``KEYFRAME_TRIES`` times until the chat model
+        confirms it shows ``checks``; kept per scene version so a resumed job
+        reuses it. ``None`` when no try passed (or the check could not run)."""
+        path = ws.path("keyframes", f"scene_{scene['idx']}_v{scene['version']}_{kind}.png")
+        if path.exists():
+            return path.read_bytes()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = path.with_suffix(".raw")
+        label = "awal" if kind == "start" else "akhir"
+        for attempt in range(1, KEYFRAME_TRIES + 1):
+            self._progress(job, self.repo.job(job["id"])["progress"],
+                           f"Scene {scene['idx'] + 1}: membuat frame {label} ({attempt}/{KEYFRAME_TRIES})…")
+            try:
+                raw.write_bytes(make())
+                media.fit_image(raw, path, *size)
+            except ProviderError as exc:
+                if exc.status == 499:
+                    raise JobCanceled() from exc
+                log.warning("scene %s %s keyframe attempt %s failed (%s)", scene["idx"], kind, attempt, exc.status)
+                if not exc.retryable:
+                    break
+                continue
+            except media.MediaError:
+                log.warning("scene %s %s keyframe attempt %s unreadable", scene["idx"], kind, attempt)
+                continue
+            finally:
+                raw.unlink(missing_ok=True)
+            problems = self._frame_problems(job, profile, client, scene, path, checks)
+            if problems == []:
+                log.info("scene %s %s keyframe ok (attempt %s)", scene["idx"], kind, attempt)
+                return path.read_bytes()
+            log.info("scene %s %s keyframe attempt %s rejected: %s", scene["idx"], kind, attempt,
+                     ", ".join(problems) if problems else "not checked")
+            path.unlink(missing_ok=True)
+            if problems is None:
+                break
+        log.warning("scene %s: no %s keyframe, clip made without it", scene["idx"], kind)
+        return None
+
+    def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed, last=None) -> None:
         """A clip that left its seed or ends without what its shot promises gets one
         more (billed) try; the better of the two stays and what is still wrong is
         shown on the scene. The first clip is already saved, so a failed retake
@@ -569,7 +659,7 @@ class Engine:
             self._progress(job, self.repo.job(job["id"])["progress"],
                            f"Scene {scene['idx'] + 1} tidak sesuai, generate ulang sekali…")
             self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
-            video = self._request_clip(job, project, profile, client, preset, scene, ws, seed)
+            video = self._request_clip(job, project, profile, client, preset, scene, ws, seed, last)
             name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
             ws.path(name).write_bytes(video.data)
             retake_left, retake_gap = flaws(ws.path(name))

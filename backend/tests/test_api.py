@@ -108,7 +108,7 @@ def test_models_grouped_by_field_and_draft_probe(client, fake_client):
     login(client)
     profile = _profile(client)
     by_field = client.get(f"/api/profiles/{profile['id']}/models").json()["by_field"]
-    assert by_field == {"chat": ["kimi"], "video": ["seedance-2.5"], "tts": ["edge-tts"]}
+    assert by_field == {"chat": ["kimi"], "video": ["seedance-2.5"], "tts": ["edge-tts"], "image": []}
     draft = client.post("/api/profiles/models", json={"base_url": "https://ai.example.com", "api_key": "sk-new"})
     assert draft.status_code == 200 and draft.json()["by_field"]["video"] == ["seedance-2.5"]
     reuse = client.post("/api/profiles/models", json={"base_url": "https://ai.example.com", "profile_id": profile["id"]})

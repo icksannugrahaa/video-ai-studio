@@ -7,7 +7,7 @@ import dataclasses
 import pytest
 
 from app import engine as app_engine
-from app.pipeline import media
+from app.pipeline import media, planner
 from app.providers import ProviderError
 from tests.conftest import login, needs_ffmpeg
 
@@ -842,3 +842,83 @@ def test_active_seconds_ignores_a_held_pose_and_normalize_drops_it(tmp_path):
                                preset="ultrafast", retime=2.2, active=2.0)
     assert abs(media.duration(out) - 2.2) < 0.15
     assert media.active_seconds(out) > 1.9      # the action now runs to the end instead of stalling
+
+
+_COUNT_START = ("Table; the camera stays still. START: Rani center-back; exactly one large red apple on the table; "
+                "exactly four in a basket on the table front-right edge. ACTION: the children look at the apple. "
+                "END: Rani center-back; exactly one large red apple on the table; exactly four in a basket on the "
+                "table front-right edge.")
+_COUNT_STEP = ("Table; the camera stays still. START: Rani center-back; exactly one large red apple on the table; "
+               "exactly four in a basket on the table front-right edge. ACTION: Rani takes one apple from the basket, "
+               "placing it right of the first. END: Rani center-back; exactly two large red apples in a row on the "
+               "table; exactly three in a basket on the table front-right edge.")
+
+
+def _keyframe_project(app, client, fake_client, monkeypatch, *replies):
+    board = _bible_board(False, True)
+    board["scenes"][0]["visual_prompt"], board["scenes"][1]["visual_prompt"] = _COUNT_START, _COUNT_STEP
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    queue = list(replies)
+    plain = fake_client.chat
+
+    def chat(self, model, messages, temperature=0.7, max_tokens=4096):
+        if isinstance(messages[-1]["content"], list):
+            fake_client.calls.append(("look", ""))
+            return queue.pop(0)
+        return plain(self, model, messages, temperature, max_tokens)
+
+    monkeypatch.setattr(fake_client, "chat", chat)
+    project = _setup(client, continuity=True)
+    client.patch(f"/api/profiles/{project['profile_id']}", json={"image_model": "gpt-image-2"})
+    client.post(f"/api/projects/{project['id']}/plan")
+    _run_jobs(app)
+    return project["id"]
+
+
+@needs_ffmpeg
+def test_counting_step_gets_a_checked_end_keyframe_and_the_first_shot_a_start_keyframe(app, client, fake_client,
+                                                                                        monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    one, two = '{"count":1,"visible":{"basket":true}}', '{"count":2,"visible":{"basket":true}}'
+    # start keyframe, first clip's end, end keyframe, second clip's end
+    pid = _keyframe_project(app, client, fake_client, monkeypatch, one, one, two, two)
+    fake_client.calls = []
+    _rendered(client, app, pid)
+    images = [c[1] for c in fake_client.calls if c[0] == "image"]
+    assert images == ["generate", "edit"]  # first shot drawn, counting step edited from its first frame
+    videos = _videos(fake_client)
+    assert [v[4] for v in videos] == [True, True]  # both clips start on an image
+    assert fake_client.last_frames[0] is None and fake_client.last_frames[1][:8] == b"\x89PNG\r\n\x1a\n"
+    assert planner.ENDING_SHOT in videos[1][1] and planner.ENDING_SHOT not in videos[0][1]
+
+
+@needs_ffmpeg
+def test_end_keyframe_that_never_shows_the_count_is_left_out(app, client, fake_client, monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    one, two = '{"count":1,"visible":{"basket":true}}', '{"count":2,"visible":{"basket":true}}'
+    wrong = '{"count":3,"visible":{"basket":true}}'
+    # start keyframe, first clip's end, three end-keyframe tries, second clip's end
+    pid = _keyframe_project(app, client, fake_client, monkeypatch, one, one, wrong, wrong, wrong, two)
+    fake_client.calls = []
+    _rendered(client, app, pid)
+    assert [c[1] for c in fake_client.calls if c[0] == "image"] == ["generate", "edit", "edit", "edit"]
+    assert fake_client.last_frames == [None, None]  # the clip is made from its first frame alone
+    assert len(_videos(fake_client)) == 2
+
+
+@needs_ffmpeg
+def test_regenerate_feeds_the_findings_to_the_next_take_and_remakes_the_shots_after_it(app, client, fake_client,
+                                                                                         monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True, True, False)
+    _rendered(client, app, pid)
+    repo = app.state.services.repo
+    second = next(s for s in repo.scenes(pid) if s["idx"] == 1)
+    repo.update_scene(second["id"], clip_error="Frame terakhir: apples 4, seharusnya 5")
+    fake_client.calls = []
+    assert client.post(f"/api/projects/{pid}/scenes/1/regenerate").status_code == 200
+    _run_jobs(app)
+    prompts = [v[1] for v in _videos(fake_client)]
+    assert len(prompts) == 2  # scene 2 and the scene continuing from it; not the first, not the new sequence
+    assert "shot 1" in prompts[0] and "4 apples instead of 5" in prompts[0]
+    assert "shot 2" in prompts[1] and "instead of" not in prompts[1]

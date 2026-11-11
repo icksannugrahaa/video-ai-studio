@@ -6,7 +6,8 @@ from __future__ import annotations
 from app.db import Database, dumps, loads, now
 from app.security import hash_password, hash_token, new_api_token
 
-PROFILE_FIELDS = ("name", "base_url", "chat_model", "video_model", "tts_model", "tts_voice", "clip_seconds")
+PROFILE_FIELDS = ("name", "base_url", "chat_model", "video_model", "tts_model", "image_model", "tts_voice",
+                  "clip_seconds")
 PROJECT_FIELDS = ("title", "prompt", "preset", "target_seconds", "language", "profile_id")
 DEFAULT_OPTIONS = {
     "continuity": True,          # last frame of clip N seeds clip N+1
@@ -92,10 +93,10 @@ class Repo:
     def create_profile(self, user_id: int, data: dict, api_key_enc: str) -> int:
         return self.db.execute(
             "INSERT INTO profiles(user_id, name, base_url, api_key_enc, chat_model, video_model, tts_model, "
-            "tts_voice, clip_seconds, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "image_model, tts_voice, clip_seconds, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (user_id, data["name"], data["base_url"], api_key_enc, data.get("chat_model", ""),
-             data.get("video_model", ""), data.get("tts_model", ""), data.get("tts_voice", ""),
-             int(data.get("clip_seconds") or 5), now()),
+             data.get("video_model", ""), data.get("tts_model", ""), data.get("image_model", ""),
+             data.get("tts_voice", ""), int(data.get("clip_seconds") or 5), now()),
         )
 
     def profiles(self, user_id: int) -> list[dict]:
@@ -202,18 +203,23 @@ class Repo:
                     "clip_status = CASE WHEN ? THEN clip_status ELSE 'pending' END, "
                     "clip_error = CASE WHEN ? THEN clip_error ELSE NULL END, "
                     "narration_file = CASE WHEN ? THEN narration_file ELSE NULL END, "
-                    "narration_json = CASE WHEN ? THEN narration_json ELSE NULL END "
+                    "narration_json = CASE WHEN ? THEN narration_json ELSE NULL END, "
+                    "correction = CASE WHEN ? THEN correction ELSE NULL END "
                     "WHERE id = ?",
                     (scene["visual_prompt"], scene["narration"], scene["duration"], int(continues), same_visual, same_visual,
-                     same_visual, same_narration, same_narration, prev["id"]),
+                     same_visual, same_narration, same_narration, same_visual, prev["id"]),
                 )
         return {"changed_visual": changed_visual, "changed_narration": changed_narration}
 
-    def bump_scene(self, project_id: int, idx: int) -> bool:
-        """Force regeneration of one scene's clip."""
-        return self.db.execute(
-            "UPDATE scenes SET version = version + 1, clip_status = 'pending', clip_error = NULL "
-            "WHERE project_id = ? AND idx = ?", (project_id, idx)) > 0
+    def bump_scene(self, project_id: int, idx: int, correction: str | None = None) -> bool:
+        """Force regeneration of one scene's clip. ``correction`` (what the last take
+        got wrong) is kept for the next take's prompt; ``None`` leaves it as it is."""
+        sets = "version = version + 1, clip_status = 'pending', clip_error = NULL"
+        params: tuple = (project_id, idx)
+        if correction is not None:
+            sets += ", correction = ?"
+            params = (correction or None, project_id, idx)
+        return self.db.execute(f"UPDATE scenes SET {sets} WHERE project_id = ? AND idx = ?", params) > 0
 
     def update_scene(self, scene_id: int, **fields) -> None:
         if "narration_info" in fields:

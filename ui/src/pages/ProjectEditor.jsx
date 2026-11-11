@@ -321,9 +321,14 @@ export default function ProjectEditor({ projectId }) {
   }
 
   async function regenerate(i) {
+    // The scenes continuing from this one start from its last frame, so the server remakes them too.
+    let follow = 0;
+    if (project.options.continuity) {
+      while (project.scenes[i + 1 + follow]?.continues) follow += 1;
+    }
     if (!(await dialog.confirm({
       title: t('editor.regenTitle', { n: i + 1 }),
-      body: t('editor.regenBody'),
+      body: follow ? t('editor.regenBodyChain', { k: follow, to: i + 1 + follow }) : t('editor.regenBody'),
       confirmLabel: t('editor.regenConfirm'),
     }))) return;
     await run(() => api.post(`/projects/${projectId}/scenes/${i}/regenerate`), t('editor.regenStarted', { n: i + 1 }));

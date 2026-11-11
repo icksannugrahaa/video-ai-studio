@@ -74,7 +74,9 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   untouched>. END: <the last frame, in the same terms as START>."
   Counted objects: START says "exactly three large red apples in a row on the table and no other apples"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
-  equal the count in START plus what ACTION adds. Without a song the placing is done by the third second of the clip; in a song each
+  equal the count in START plus what ACTION adds. ONE counting step per shot: ACTION moves exactly one counted object,
+  so counting from 0 to 5 takes five shots (plus an opening and a closing shot when the idea needs them); never two
+  placings in one shot, because the video model loses or doubles objects when one clip holds several. Without a song the placing is done by the third second of the clip; in a song the
   placing falls on the lyric line of the number it brings the count to. The hands then leave the objects alone until END
   while the characters keep moving gently, so the action lasts to the last frame. The named place is a story object too: put it on the front edge of the same
   surface, closest to the camera with nobody in front of it, never behind a person or at the edge of the frame, always
@@ -146,6 +148,8 @@ SONG_PLACING = ("Each object is set down as the number it brings the count to is
 CAMERA_LOCK = ("The camera is fixed on a tripod: no pan, tilt, zoom, push-in, pull-back or drift; the walls, windows and "
                "table edges keep the same position in the frame from the first to the last frame.")
 _STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera (?:stays )?still|fixed (?:camera|[\w-]* ?shot)|static camera)\b", re.I)
+ENDING_SHOT = ("The last frame is supplied as well: the action ends exactly on it, with every object where it "
+               "shows it; move naturally from the first image to the last one.")
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
                "positions. Every object in the image is there from the first frame and stays in place; "
                "nothing disappears or resets.")
@@ -209,7 +213,43 @@ _COUNT_RE = re.compile(r"\bexactly (\d+|" + "|".join(_NUMBERS) + r") (?:[a-z-]+ 
 _KEPT_RE = re.compile(r"\bThe ([a-z][a-z -]*?)(?: (?:at|on|in|beside|near|by|under|behind) [^;.]*?)? stays in clear view", re.I)
 _LEFT_IN_RE = re.compile(r"\bexactly \w+(?: more)? in (?:(?:a|an|the) )?(?:[a-z-]+ )*?([a-z]+)\b"
                          r"(?=\s+(?:at|on|in|beside|near|by|under|behind|front|rear|back|left|right)\b|[,;.]|$)"
-                         r"|\b([a-z]+) empty\b", re.I)
+                         r"|\b(?!(?:is|are|now|stays|remains|left|sits|lies|stands|be|hands?|arms?|palms?|mouths?)\b)([a-z]+) empty\b", re.I)
+
+
+_IN_CONTAINER_RE = re.compile(r"\s+(?:in|inside|within)\s+(?:(?:a|an|the)\s+)?"
+                              r"(?!(?:[\w-]+\s+){0,2}(?:rows?|lines?|columns?|circles?|groups?|pairs?)\b)", re.I)
+
+
+_CONTAINER_NAME_RE = re.compile(r"\s+(?:in|inside|within)\s+(?:(?:a|an|the)\s+)?(?:[a-z-]+\s+)*?([a-z]+)\b"
+                                r"(?=\s+(?:at|on|in|beside|near|by|under|behind)\b|\s*[,;.]|\s*$)", re.I)
+
+
+_ONE_RE = re.compile(r"\bexactly (?:one|1|a single) (?:[a-z-]+ ){0,3}?([a-z]+[^s\W])\b"
+                     r"(?=\s+(?:on|in|at|beside|near|by|under|behind|to|lies|sits|stands)\b|\s*[,;.]|\s*$)", re.I)
+
+
+def _state_checks(state: str, action: str = "") -> dict | None:
+    # "exactly five apples in a basket" counts what a container holds, not what lies in view
+    count, held = None, []
+    for m in _COUNT_RE.finditer(state):
+        if not _IN_CONTAINER_RE.match(state[m.end():]):
+            count = count or m
+            continue
+        place = _CONTAINER_NAME_RE.match(state[m.end():])
+        if place:
+            held.append(place.group(1).lower())
+    words = [m.group(1).split()[-1].lower() for m in _SOURCE_RE.finditer(action)] if action else []
+    words += [m.group(1).split()[-1].lower() for m in _KEPT_RE.finditer(state)]
+    words += [(m.group(1) or m.group(2)).lower() for m in _LEFT_IN_RE.finditer(state)] + held
+    number = count and (int(count.group(1)) if count.group(1).isdigit() else _NUMBERS[count.group(1).lower()])
+    noun = count.group(2).lower() if count else ""
+    if not count:  # "exactly one large red apple on the table": a single object is counted too
+        single = next((m for m in _ONE_RE.finditer(state) if not _IN_CONTAINER_RE.match(state[m.end():])), None)
+        if single:
+            number, noun = 1, single.group(1).lower() + "s"
+    if not (number or words):
+        return None
+    return {"count": number or None, "noun": noun, "visible": list(dict.fromkeys(words))}
 
 
 def end_checks(visual_prompt: str) -> dict | None:
@@ -218,14 +258,69 @@ def end_checks(visual_prompt: str) -> dict | None:
     end, action = _END_RE.search(visual_prompt), _ACTION_RE.search(visual_prompt)
     if not end:
         return None
-    count = _COUNT_RE.search(end.group(1))
-    words = [m.group(1).split()[-1].lower() for m in _SOURCE_RE.finditer(action.group(1))] if action else []
-    words += [m.group(1).split()[-1].lower() for m in _KEPT_RE.finditer(end.group(1))]
-    words += [(m.group(1) or m.group(2)).lower() for m in _LEFT_IN_RE.finditer(end.group(1))]
-    number = count and (int(count.group(1)) if count.group(1).isdigit() else _NUMBERS[count.group(1).lower()])
-    if not (count or words):
+    return _state_checks(end.group(1), action.group(1) if action else "")
+
+
+def start_checks(visual_prompt: str) -> dict | None:
+    """What a shot's first frame must show, read from its START."""
+    start = _SHOT_RE.search(visual_prompt or "")
+    return _state_checks(start.group(0)) if start else None
+
+
+def moves_objects(visual_prompt: str) -> bool:
+    """Whether the shot's ACTION takes counted objects from a place (a counting step)."""
+    action = _ACTION_RE.search(visual_prompt or "")
+    return bool(action and _SOURCE_RE.search(action.group(1)))
+
+
+def _bible_lines(options: dict) -> str:
+    style = (options.get("bible_style") or "").strip().rstrip(".")
+    character = (options.get("bible_character") or "").strip().rstrip(".")
+    world = (options.get("bible_world") or "").strip().rstrip(".")
+    return " ".join(x for x in (f"{style}." if style else "", f"Characters: {character}." if character else "",
+                                f"Setting: {world}." if world else "") if x)
+
+
+def start_frame_prompt(options: dict, visual_prompt: str) -> str:
+    """Text-to-image prompt for the first frame of a shot that has no frame to start from."""
+    shot = drop_future_objects((visual_prompt or "").strip())
+    start = _SHOT_RE.search(shot)
+    head = shot.split("START:")[0].strip()
+    state = start.group(0).replace("START:", "", 1).strip() if start else shot
+    return (f"{_bible_lines(options)} One still frame from the video, before anything moves. Camera and place: {head} "
+            f"The frame shows exactly: {state} Every counted object is clearly visible and separated, nothing in front "
+            "of it. No text, captions or watermarks.").strip()
+
+
+def end_frame_prompt(options: dict, visual_prompt: str) -> str:
+    """Image-edit instruction turning a shot's first frame into its last one."""
+    shot = drop_future_objects((visual_prompt or "").strip())
+    action, end = _ACTION_RE.search(shot), _END_RE.search(shot)
+    style = (options.get("bible_style") or "").strip().rstrip(".")
+    return ("Edit this still frame from an animated video into the moment right after this action: "
+            f"{action.group(1).strip() if action else ''} The edited frame shows exactly: "
+            f"{end.group(1).strip() if end else ''} Keep everything else identical: camera, framing, lighting, room, "
+            "every character's face, clothes and place, and every object the action does not mention. "
+            f"Every counted object is clearly visible and separated. Same look: {style or 'unchanged'}. "
+            "No text, captions or watermarks.")
+
+
+_FINDING_COUNT_RE = re.compile(r"([a-z-]+) (\d+), seharusnya (\d+)")
+_FINDING_MISSING_RE = re.compile(r"([a-z-]+) tidak terlihat")
+
+
+def correction_note(clip_error: str | None) -> str | None:
+    """The last take's end-state findings ("apples 4, seharusnya 5") as an order for
+    the next take; ``None`` when the clip had no such finding."""
+    if not clip_error or not clip_error.startswith("Frame terakhir:"):
         return None
-    return {"count": number or None, "noun": count.group(2).lower() if count else "", "visible": list(dict.fromkeys(words))}
+    body = clip_error.split(":", 1)[1]
+    said = [f"{seen} {noun} instead of {want}" for noun, seen, want in _FINDING_COUNT_RE.findall(body)]
+    said += [f"no {noun} in view" for noun in _FINDING_MISSING_RE.findall(body)]
+    if not said:
+        return None
+    return (f"A previous take of this shot ended wrong ({'; '.join(said)}). This take must end exactly as END says: "
+            "no object disappears, none is added, and every place that holds objects stays in view.")
 
 
 def sequence_checks(scenes: list[dict], scene: dict) -> dict | None:
@@ -292,7 +387,7 @@ def prompt_limit(video_model: str) -> int | None:
 
 
 def clip_prompt_parts(options: dict, visual_prompt: str, sung: str = "", seeded: bool = False,
-                      previous: str = "") -> list[tuple[str, int]]:
+                      previous: str = "", correction: str = "", ends_on_image: bool = False) -> list[tuple[str, int]]:
     """The pieces of :func:`clip_prompt` with their drop rank (0 = always kept)."""
     style = (options.get("bible_style") or "").strip().rstrip(".")
     character = (options.get("bible_character") or "").strip().rstrip(".")
@@ -308,12 +403,16 @@ def clip_prompt_parts(options: dict, visual_prompt: str, sung: str = "", seeded:
     if world:
         parts.append((f"Setting: {world}.", 0))
     parts.append((f"Shot: {shot}", 0))
+    if correction:
+        parts.append((correction, 0))
     if seeded:
         if previous and "START:" not in shot:
             end = _END_RE.search(previous)
             parts.append((f"It continues directly from the previous shot, which showed: "
                           f"{(end.group(1) if end else previous).strip()}", _DROP_PREVIOUS))
         parts.append((SEEDED_SHOT, 0))
+    if ends_on_image:
+        parts.append((ENDING_SHOT, 0))
     if sung:
         parts.append((sung, 0))
         action = _ACTION_RE.search(shot)
@@ -680,19 +779,39 @@ def song_lengths(scenes: list[dict], lyrics: str, music_seconds: float | None = 
     return lengths if min(lengths) >= 1.0 else None
 
 
+_COUNT_WORDS = re.compile(r"\b(?:\d+|satu|dua|tiga|empat|lima|enam|tujuh|delapan|sembilan|sepuluh|"
+                          r"one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
+
+
 def lyric_parts(lyrics: str, total: float, clip_seconds: int) -> list[tuple[float, float, str]]:
     """The song cut into clip-sized parts ``(start, end, words)``. Cuts fall on
     the start of a sung line when one fits; a long instrumental stretch is split
-    evenly by clip length. A tail too short to film joins the part before it."""
+    evenly by clip length. A tail too short to film joins the part before it.
+    A part holds at most one counting line ("dua apel"): one clip, one counting
+    step (seen live: two placings in one clip lost an apple)."""
     timed = _timed_lines(lyrics)
     lines = [(t, text) for t, text in timed if text and t < total]
     if not lines or total <= 0:
         return []
+    shortest = min_clip_seconds(clip_seconds)
+
+    def second_count(start: float, end: float) -> float | None:
+        counted = [t for t, text in lines if start <= t < end and _COUNT_WORDS.search(text)]
+        return counted[1] if len(counted) > 1 and counted[1] - start >= shortest else None
+
     edges = [0.0]
-    while total - edges[-1] > clip_seconds:
-        fits = [t for t, _ in lines if edges[-1] < t <= edges[-1] + clip_seconds]
-        edges.append(fits[-1] if fits else edges[-1] + clip_seconds)
-    if len(edges) > 1 and total - edges[-1] < min_clip_seconds(clip_seconds):
+    while True:
+        start = edges[-1]
+        if total - start <= clip_seconds:
+            split = second_count(start, total)
+            if split is None or total - split < shortest:
+                break
+            edges.append(split)
+            continue
+        fits = [t for t, _ in lines if start < t <= start + clip_seconds]
+        end = fits[-1] if fits else start + clip_seconds
+        edges.append(second_count(start, end) or end)
+    if len(edges) > 1 and total - edges[-1] < shortest:
         edges.pop()
     edges.append(float(total))
     return [(a, b, " ".join(text for t, text in lines if a <= t < b)) for a, b in zip(edges, edges[1:])]
@@ -741,6 +860,7 @@ def scene_prompt_sizes(options: dict, scenes: list[dict]) -> list[tuple[int, int
         start += lengths[i]
         seeded = continuity and i > 0 and (bool(scene.get("continues")) or not bible)
         parts = clip_prompt_parts(options, scene["visual_prompt"], sung=sung, seeded=seeded,
-                                  previous=ordered[i - 1]["visual_prompt"] if i else "")
+                                  previous=ordered[i - 1]["visual_prompt"] if i else "",
+                                  correction=scene.get("correction") or "")
         sizes.append(prompt_sizes(parts))
     return sizes

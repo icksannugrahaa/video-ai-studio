@@ -105,6 +105,29 @@ def has_audio(path: Path) -> bool:
     return any(s.get("codec_type") == "audio" for s in probe(path).get("streams") or [])
 
 
+def fit_image(src: Path, dst: Path, width: int, height: int) -> Path:
+    """Scale and centre-crop an image to exactly ``width``×``height`` PNG: a
+    keyframe must have the clip's size (a first frame fixes the clip's ratio)."""
+    _run(["-i", src, "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1",
+          "-frames:v", "1", dst])
+    if not Path(dst).exists():
+        raise MediaError("gagal menyesuaikan ukuran gambar")
+    return Path(dst)
+
+
+def image_size(path: Path) -> tuple[int, int]:
+    """(width, height) of an image or a video's first stream."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise MediaError("ffprobe tidak ditemukan")
+    proc = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                           "-of", "json", str(path)], capture_output=True, timeout=60)
+    streams = json.loads(proc.stdout or b"{}").get("streams") or [] if proc.returncode == 0 else []
+    if not streams or not streams[0].get("width"):
+        raise MediaError("ukuran gambar tidak terbaca")
+    return int(streams[0]["width"]), int(streams[0]["height"])
+
+
 def last_frame_png(video: Path, out_png: Path) -> Path:
     """Grab the very last frame — continuity seed for the next clip. Decoding
     the tail and keeping the final image matters: a frame from 0.3 s earlier

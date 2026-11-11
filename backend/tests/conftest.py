@@ -53,6 +53,7 @@ class FakeClient:
     edited: dict | None = None
     fail_video_times: int = 0
     fail_prompts: tuple = ()  # prompts containing one of these fail permanently (non-retryable)
+    last_frames: list = []  # last_png of every video call, in order
 
     def __init__(self, base_url: str, api_key: str):
         self.base_url, self.api_key = base_url, api_key
@@ -75,8 +76,9 @@ class FakeClient:
                 {"id": "edge-tts", "kind": "tts"}, {"id": "qwen3-tts-flash-realtime", "kind": "tts"}]
 
     def generate_video(self, model, prompt, *, seconds=None, aspect_ratio=None, resolution=None,
-                       image_png=None, enable_audio=False, should_cancel=None):
+                       image_png=None, last_png=None, enable_audio=False, should_cancel=None):
         FakeClient.calls.append(("video", prompt, seconds, aspect_ratio, image_png is not None))
+        FakeClient.last_frames.append(last_png)
         if any(marker in prompt for marker in FakeClient.fail_prompts):
             raise ProviderError("ditolak filter konten", status=422, retryable=False)
         if FakeClient.fail_video_times > 0:
@@ -86,6 +88,19 @@ class FakeClient:
         _ffmpeg(["-f", "lavfi", "-i", f"testsrc=size=160x284:rate=12:duration={seconds or 2}",
                  "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(out)])
         return VideoResult(out.read_bytes())
+
+    def generate_image(self, model, prompt, *, size=None):
+        FakeClient.calls.append(("image", "generate", prompt))
+        return self._png("red")
+
+    def edit_image(self, model, image_png, prompt, *, size=None):
+        FakeClient.calls.append(("image", "edit", prompt))
+        return self._png("blue")
+
+    def _png(self, colour):
+        out = Path(self._tmp()) / "frame.png"
+        _ffmpeg(["-f", "lavfi", "-i", f"color=c={colour}:size=300x200", "-frames:v", "1", str(out)])
+        return out.read_bytes()
 
     def tts(self, model, text, voice="", language="", fmt="wav"):
         FakeClient.calls.append(("tts", text, voice))
@@ -106,6 +121,7 @@ def fake_client():
     FakeClient.edited = None
     FakeClient.fail_video_times = 0
     FakeClient.fail_prompts = ()
+    FakeClient.last_frames = []
     return FakeClient
 
 

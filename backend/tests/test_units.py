@@ -659,3 +659,40 @@ def test_room_for_objects_not_there_yet_is_not_sent_to_the_video_model():
         "keep empty space on the right"
     for kept in ("room for his hands", "space for the final count", "exactly four apples in a basket"):
         assert planner.drop_future_objects(kept) == kept
+
+
+def test_song_part_never_holds_two_counting_steps():
+    lyrics = ("[0:00] Bu Guru, dua murid, apel di keranjang\n[0:03] Nol apel di meja\n[0:06] Ambil satu, satu apel\n"
+              "[0:10] Ambil lagi, dua apel\n[0:14] Ambil lagi, tiga apel\n[0:18] Ambil lagi, empat apel\n"
+              "[0:22] Ambil lagi, lima apel\n[0:25] Lima apel di meja")
+    parts = planner.lyric_parts(lyrics, 30, 10)
+    assert [p[2] for p in parts[1:5]] == ["Ambil satu, satu apel", "Ambil lagi, dua apel", "Ambil lagi, tiga apel",
+                                          "Ambil lagi, empat apel"]
+    assert all(b - a >= planner.min_clip_seconds(10) for a, b, _ in parts)
+
+
+def test_container_contents_and_verbs_are_not_read_as_what_lies_in_view():
+    end = planner.end_checks("x. START: a. ACTION: takes one apple from the basket. END: exactly five large red "
+                             "apples in a tabletop row; the basket on the table, nearest camera, is empty.")
+    assert end == {"count": 5, "noun": "apples", "visible": ["basket"]}  # "is" is not an object
+    start = planner.start_checks("x. START: tabletop bare; exactly five large red apples in a shallow basket on "
+                                 "the table. ACTION: y. END: z.")
+    assert start == {"count": None, "noun": "", "visible": ["basket"]}
+
+
+def test_last_take_findings_become_an_order_for_the_next_take():
+    note = planner.correction_note("Frame terakhir: apples 4, seharusnya 5, basket tidak terlihat")
+    assert "4 apples instead of 5" in note and "no basket in view" in note
+    assert planner.correction_note(None) is None
+    assert planner.correction_note("Frame terakhir belum dicek: model chat tidak menjawab.") is None
+    prompt = planner.clip_prompt({"bible_style": "3D"}, "shot", )
+    assert note not in prompt
+    parts = planner.clip_prompt_parts({"bible_style": "3D"}, "shot", correction=note, seeded=True, ends_on_image=True)
+    texts = [t for t, _ in parts]
+    assert note in texts and planner.ENDING_SHOT in texts
+
+
+def test_a_single_object_is_counted_and_empty_hands_are_no_container():
+    start = planner.start_checks("x. START: Rani center-back; hands empty; exactly one large red apple on the "
+                                 "far-left tabletop; exactly four in a basket on the table. ACTION: y. END: z.")
+    assert start == {"count": 1, "noun": "apples", "visible": ["basket"]}

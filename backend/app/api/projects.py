@@ -364,12 +364,25 @@ def generate_song(project_id: int, body: MusicPromptBody, user: dict = Depends(c
 
 @router.post("/projects/{project_id}/scenes/{idx}/regenerate")
 def regenerate(project_id: int, idx: int, user: dict = Depends(current_user), svc=Depends(services)):
+    """Make the scene again. What its last take got wrong goes into the next take's
+    prompt, and the shots continuing from it are made again too: each starts from
+    the last frame of the one before, so they would keep the old mistake."""
     project = _project(svc, user, project_id)
     if svc.repo.active_job(project["id"]):
         raise HTTPException(409, "masih ada job berjalan untuk project ini")
-    if not svc.repo.bump_scene(project_id, idx):
+    scenes = sorted(svc.repo.scenes(project_id), key=lambda s: s["idx"])
+    scene = next((s for s in scenes if s["idx"] == idx), None)
+    if scene is None:
         raise HTTPException(404, "scene tidak ditemukan")
-    return _queue(svc, user, project, "regenerate", {"idx": idx})
+    svc.repo.bump_scene(project_id, idx, planner.correction_note(scene["clip_error"]))
+    chain = [idx]
+    if project["options"].get("continuity"):
+        for later in scenes[scenes.index(scene) + 1:]:
+            if not later["continues"]:
+                break
+            svc.repo.bump_scene(project_id, later["idx"])
+            chain.append(later["idx"])
+    return _queue(svc, user, project, "regenerate", {"idx": idx, "scenes": chain})
 
 
 @router.post("/projects/{project_id}/music")

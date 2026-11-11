@@ -19,6 +19,7 @@ CHAT_TIMEOUT = 180  # longest silence between bytes of a chat stream
 CHAT_MAX_WAIT = 15 * 60
 RETRYABLE_STATUS = (408, 409, 425, 429)
 TTS_TIMEOUT = 120
+IMAGE_TIMEOUT = 300
 VIDEO_SUBMIT_TIMEOUT = 120
 VIDEO_SYNC_TIMEOUT = 900
 VIDEO_POLL_SECONDS = 8
@@ -212,11 +213,42 @@ class ProviderClient:
             return base64.b64decode(payload.get("audio") or "")
         return resp.content
 
+    # ── images (keyframes) ─────────────────────────────────────────────
+    def generate_image(self, model: str, prompt: str, *, size: str | None = None) -> bytes:
+        body: dict = {"model": model, "prompt": prompt, "n": 1, "response_format": "b64_json"}
+        if size:
+            body["size"] = size
+        resp = self._call("POST", f"{self.base}/v1/images/generations", "buat gambar",
+                          headers=self._headers(), json=body, timeout=IMAGE_TIMEOUT)
+        return self._image_from(resp, "buat gambar")
+
+    def edit_image(self, model: str, image_png: bytes, prompt: str, *, size: str | None = None) -> bytes:
+        data = {"model": model, "prompt": prompt, "n": "1", "response_format": "b64_json"}
+        if size:
+            data["size"] = size
+        resp = self._call("POST", f"{self.base}/v1/images/edits", "edit gambar", headers=self._headers(False),
+                          files={"image": ("frame.png", image_png, "image/png")}, data=data, timeout=IMAGE_TIMEOUT)
+        return self._image_from(resp, "edit gambar")
+
+    def _image_from(self, resp: requests.Response, what: str) -> bytes:
+        if resp.status_code != 200:
+            raise self._error(resp, what)
+        try:
+            items = (resp.json() or {}).get("data") or [{}]
+        except ValueError as exc:
+            raise ProviderError(f"{what}: respons bukan JSON") from exc
+        item = items[0] if isinstance(items[0], dict) else {}
+        if item.get("b64_json"):
+            return base64.b64decode(item["b64_json"])
+        if item.get("url"):
+            return self._download(item["url"])
+        raise ProviderError(f"{what}: respons tidak berisi gambar")
+
     # ── video ──────────────────────────────────────────────────────────
     def generate_video(self, model: str, prompt: str, *, seconds: int | None = None,
                        aspect_ratio: str | None = None, resolution: str | None = None,
-                       image_png: bytes | None = None, enable_audio: bool = False,
-                       should_cancel=None) -> VideoResult:
+                       image_png: bytes | None = None, last_png: bytes | None = None,
+                       enable_audio: bool = False, should_cancel=None) -> VideoResult:
         """Generate one clip. Tries the router async job API first and falls
         back to a synchronous request when the provider has no job support."""
         body: dict = {"model": model, "prompt": prompt, "enable_audio": enable_audio}
@@ -228,6 +260,8 @@ class ProviderClient:
             body["resolution"] = resolution
         if image_png:
             body["image"] = "data:image/png;base64," + base64.b64encode(image_png).decode("ascii")
+        if image_png and last_png:  # the clip's final frame (first-and-last-frames models)
+            body["last_frame"] = "data:image/png;base64," + base64.b64encode(last_png).decode("ascii")
 
         resp = self._call("POST", f"{self.base}/v1/videos/generations", "generate video",
                           headers=self._headers(), json={**body, "async": True}, timeout=VIDEO_SUBMIT_TIMEOUT)

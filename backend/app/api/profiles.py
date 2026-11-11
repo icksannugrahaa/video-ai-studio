@@ -19,6 +19,7 @@ class ProfileBody(BaseModel):
     chat_model: str = Field(default="", max_length=200)
     video_model: str = Field(default="", max_length=200)
     tts_model: str = Field(default="", max_length=200)
+    image_model: str = Field(default="", max_length=200)
     tts_voice: str = Field(default="", max_length=120)
     clip_seconds: int = Field(default=5, ge=2, le=30)
 
@@ -94,7 +95,7 @@ class ModelsProbeBody(BaseModel):
 
 
 # Which model kinds each profile field accepts (router ``kind`` vocabulary).
-FIELD_KINDS = {"chat": ("chat", "vision"), "video": ("video",), "tts": ("tts",)}
+FIELD_KINDS = {"chat": ("chat", "vision"), "video": ("video",), "tts": ("tts",), "image": ("image",)}
 # Speech models that only work over realtime/WebSocket sessions or translate speech.
 _NON_HTTP_TTS = ("realtime", "livetranslate", "-s2s", "omni")
 
