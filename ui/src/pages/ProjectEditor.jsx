@@ -71,7 +71,7 @@ function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPr
   } else if (clipsReady === 0) {
     icon = 'play';
     title = t('next.renderTitle');
-    text = t('next.renderText', { total, duration: fmtDuration(totalSeconds(project.scenes), t) });
+    text = t('next.renderText', { scenes: total, duration: fmtDuration(totalSeconds(project.scenes), t) });
     actions = <Button className="primary" icon="play" onClick={onRender}>{t('next.renderCta')}</Button>;
   } else if (clipsReady < total) {
     icon = 'play';

@@ -20,7 +20,7 @@ function Timeline({ scenes, selected, onSelect }) {
             <button key={s.id || `new-${i}`} role="tab" aria-selected={selected === i}
               className={`tl-block ${STATE_TONE[state]}${selected === i ? ' selected' : ''}${s.continues && i > 0 ? ' cont' : ''}`}
               style={{ flex: `${Math.max(1, Number(s.duration) || 1)} 1 0` }}
-              title={`${t('sb.sceneN', { n: i + 1 })} · ${t('sb.secs', { n: s.duration })} · ${t(SCENE_LABEL[state])}${s.continues && i > 0 ? ` · ${t('sb.contPrev')}` : ''}`}
+              title={`${t('sb.sceneN', { n: i + 1 })} · ${t('sb.secs', { n: Math.round(Number(s.duration) * 10) / 10 })} · ${t(SCENE_LABEL[state])}${s.continues && i > 0 ? ` · ${t('sb.contPrev')}` : ''}`}
               onClick={() => onSelect(i)}>{i + 1}</button>
           );
         })}
@@ -126,7 +126,7 @@ function SceneCard({ scene, index, count, start, project, open, selected, busy, 
             <Icon name="clock" size={11} />{fmtClock(scene.clip_gen_seconds)}{scene.clip_attempts > 1 && <span style={{ color: 'var(--warn)' }}>×{scene.clip_attempts}</span>}
           </span>
         )}
-        <span className="faint small mono" style={{ flex: 'none' }}>{fmtClock(start)} · {t('sb.secsShort', { n: scene.duration })}</span>
+        <span className="faint small mono" style={{ flex: 'none' }}>{fmtClock(start)} · {t('sb.secsShort', { n: Math.round(Number(scene.duration) * 10) / 10 })}</span>
         {scene.id && <StatusBadge status={state === 'done' ? 'succeeded' : state === 'running' ? 'running' : state === 'failed' ? 'failed' : state === 'stale' ? 'stale' : 'pending'}
           label={t(SCENE_LABEL[state])} />}
       </div>
