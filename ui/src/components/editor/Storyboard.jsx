@@ -88,6 +88,16 @@ function BibleCard({ project, busy, run }) {
   );
 }
 
+// Length of the clip prompt the render will send (visual prompt + what the server adds
+// around it), against the video model's cap. null when there is no cap or no estimate yet.
+export function promptBudget(scene, limit) {
+  if (!limit || scene.prompt_overhead == null) return null;
+  const own = (scene.visual_prompt || '').trim().length;
+  const chars = own + scene.prompt_overhead;
+  const level = own + scene.prompt_min_overhead > limit ? 'bad' : chars > limit ? 'warn' : 'ok';
+  return { chars, limit, level };
+}
+
 function SceneCard({ scene, index, count, start, project, open, selected, busy, dirty, onToggle, onChange, onMove, onRemove, onRegenerate }) {
   const t = useT();
   const ref = React.useRef(null);
@@ -96,6 +106,7 @@ function SceneCard({ scene, index, count, start, project, open, selected, busy, 
     if (selected) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [selected]);
   const clip = scene.clip_file && (state === 'done' || state === 'stale') ? fileUrl(project.id, scene.clip_file, scene.clip_version) : null;
+  const budget = promptBudget(scene, project.prompt_limit);
 
   return (
     <div ref={ref} className={`scene${selected ? ' selected' : ''}${state === 'failed' ? ' failed' : ''}`}>
@@ -141,6 +152,14 @@ function SceneCard({ scene, index, count, start, project, open, selected, busy, 
           )}
           <label className="field"><span>{t('sb.visualLabel')} <span className="hint">— {t('sb.visualHint')}</span></span>
             <textarea rows={3} value={scene.visual_prompt} onChange={(e) => onChange('visual_prompt', e.target.value)} />
+            {budget && (
+              <span className="small mono" style={{ color: budget.level === 'bad' ? 'var(--bad)' : budget.level === 'warn' ? 'var(--warn)' : undefined }}
+                title={t('sb.promptCharsTitle')}>
+                {t('sb.promptChars', { n: budget.chars, max: budget.limit })}
+                {budget.level === 'warn' && <> · {t('sb.promptTrimmed')}</>}
+                {budget.level === 'bad' && <> · {t('sb.promptTooLong')}</>}
+              </span>
+            )}
           </label>
           <label className="field"><span>{t('sb.narrationLabel')} <span className="hint">— {t('sb.narrationHint')}</span></span>
             <textarea rows={2} value={scene.narration || ''} onChange={(e) => onChange('narration', e.target.value)} />

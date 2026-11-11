@@ -111,11 +111,36 @@ def _detail(svc, user: dict, project: dict) -> dict:
     if active and active["status"] == "queued":
         active["queue_ahead"] = svc.repo.jobs_ahead(active["id"])
     clips_ready = sum(1 for s in scenes if s["clip_status"] == "done" and s["clip_version"] == s["version"])
-    return {**project, "scenes": scenes, "files": files, "clips_ready": clips_ready,
+    limit = _prompt_limit(svc, user, project)
+    by_idx = sorted(scenes, key=lambda s: s["idx"])
+    for scene, (full, essential) in zip(by_idx, planner.scene_prompt_sizes(project["options"], by_idx)):
+        # What the render adds around the visual prompt, so the editor can count while typing.
+        own = len(scene["visual_prompt"].strip())
+        scene.update(prompt_overhead=full - own, prompt_min_overhead=essential - own)
+    return {**project, "scenes": scenes, "files": files, "clips_ready": clips_ready, "prompt_limit": limit,
             "active_job": active, "preview_job": svc.repo.latest_preview_job(project["id"]),
             "stats": _stats(svc, user, project, scenes),
             "jobs": [j for j in svc.repo.jobs_for_project(user["id"], project["id"], limit=8)
                      if j["kind"] != "preview"][:5]}
+
+
+def _prompt_limit(svc, user: dict, project: dict) -> int | None:
+    """Longest clip prompt the project's video model accepts (``None``: no known cap)."""
+    profile = svc.repo.profile(user["id"], project["profile_id"]) if project.get("profile_id") else None
+    return planner.prompt_limit(profile["video_model"]) if profile else None
+
+
+def _check_prompt_sizes(svc, user: dict, project: dict, scenes: list[dict]) -> None:
+    """Refuse a storyboard whose clip prompt stays over the model cap even with every
+    optional piece dropped: the video model would never start that clip."""
+    limit = _prompt_limit(svc, user, project)
+    if not limit:
+        return
+    indexed = [{**s, "idx": i} for i, s in enumerate(scenes)]
+    for i, (_, essential) in enumerate(planner.scene_prompt_sizes(project["options"], indexed)):
+        if essential > limit:
+            raise HTTPException(400, f"Scene {i + 1}: prompt akhir {essential} karakter, model video maksimal "
+                                     f"{limit} — persingkat prompt visual scene ini.")
 
 
 def _stats(svc, user: dict, project: dict, scenes: list[dict]) -> dict:
@@ -214,7 +239,9 @@ def put_scenes(project_id: int, body: ScenesBody, user: dict = Depends(current_u
     project = _project(svc, user, project_id)
     if svc.repo.active_job(project["id"]):
         raise HTTPException(409, "storyboard tidak bisa diubah saat job berjalan")
-    diff = svc.repo.replace_scenes(project_id, [s.model_dump() for s in body.scenes])
+    scenes = [s.model_dump() for s in body.scenes]
+    _check_prompt_sizes(svc, user, project, scenes)
+    diff = svc.repo.replace_scenes(project_id, scenes)
     if project["status"] == "draft":
         svc.repo.update_project(user["id"], project_id, {"status": "planned"})
     return {**_detail(svc, user, _project(svc, user, project_id)), "diff": diff}

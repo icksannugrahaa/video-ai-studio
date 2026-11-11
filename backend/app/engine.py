@@ -471,11 +471,16 @@ class Engine:
         raise JobFailed(f"Scene {scene['idx'] + 1} gagal: {last_error}")
 
     def _request_clip(self, job, project, profile, client, preset, scene, ws, seed):
+        parts = planner.clip_prompt_parts(project["options"], scene["visual_prompt"],
+                                          sung=self._sung_during(project, scene, ws), seeded=seed is not None,
+                                          previous=self._previous_shot(project, scene))
+        limit = planner.prompt_limit(profile["video_model"])
+        prompt = planner.fit_prompt(parts, limit)
+        full = planner.prompt_sizes(parts)[0]
+        if len(prompt) < full:
+            log.info("scene %s prompt trimmed %s -> %s chars (model limit %s)", scene["idx"], full, len(prompt), limit)
         return client.generate_video(
-            profile["video_model"], planner.clip_prompt(project["options"], scene["visual_prompt"],
-                                                        sung=self._sung_during(project, scene, ws),
-                                                        seeded=seed is not None,
-                                                        previous=self._previous_shot(project, scene)),
+            profile["video_model"], prompt,
             seconds=self._clip_seconds(project, profile, scene, ws),
             aspect_ratio=preset["model_aspect"], image_png=seed,
             enable_audio=bool(project["options"].get("keep_clip_audio")),
