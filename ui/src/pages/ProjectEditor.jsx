@@ -8,6 +8,7 @@ import Player from '../components/editor/Player.jsx';
 import SettingsPanel from '../components/editor/SettingsPanel.jsx';
 import Storyboard, { promptBudget } from '../components/editor/Storyboard.jsx';
 import SummaryCard from '../components/editor/SummaryCard.jsx';
+import BackupsCard from '../components/editor/BackupsCard.jsx';
 import { isActive, sceneState, totalSeconds } from '../components/editor/shared.js';
 import { useT } from '../i18n.jsx';
 import { alertHidden, askNotifyPermission, pickNotice } from '../components/editor/notify.js';
@@ -113,6 +114,7 @@ export default function ProjectEditor({ projectId }) {
   const toast = useToast();
   const dialog = useDialog();
   const [project, setProject] = React.useState(null);
+  const [backupsVersion, setBackupsVersion] = React.useState(0);
   const [loadError, setLoadError] = React.useState('');
   const [profiles, setProfiles] = React.useState([]);
   const [presets, setPresets] = React.useState([]);
@@ -312,12 +314,23 @@ export default function ProjectEditor({ projectId }) {
 
   async function plan() {
     askNotifyPermission();
-    if (project.scenes.length && !(await dialog.confirm({
+    if (!project.scenes.length) {
+      await run(() => api.post(`/projects/${projectId}/plan`), t('editor.planStarted'));
+      return;
+    }
+    // Rebuild starts from scratch; the current result can be kept as a backup first.
+    const choice = await dialog.choose({
       title: t('editor.replanTitle'),
       body: t('editor.replanBody'),
-      confirmLabel: t('editor.replanConfirm'),
-    }))) return;
-    await run(() => api.post(`/projects/${projectId}/plan`), t('editor.planStarted'));
+      choices: [
+        { value: 'clear', label: t('editor.replanNoBackup'), danger: true },
+        { value: 'backup', label: t('editor.replanWithBackup'), primary: true },
+      ],
+    });
+    if (!choice) return;
+    await run(() => api.post(`/projects/${projectId}/plan`, { reset: true, backup: choice === 'backup' }),
+      t(choice === 'backup' ? 'editor.replanBackedUp' : 'editor.planStarted'));
+    setBackupsVersion((v) => v + 1);
   }
 
   async function regenerate(i) {
@@ -394,6 +407,8 @@ export default function ProjectEditor({ projectId }) {
               onPreview={startPreview} previewBusy={previewBusy} />
           )}
           {!busy && hasFinal && <SummaryCard project={project} onSelectScene={selectScene} />}
+          <BackupsCard projectId={projectId} hasScenes={project.scenes.length > 0} busy={busy} version={backupsVersion}
+            onRestored={(p) => { setDirty(false); setProject(p); setScenes(p.scenes.map((s) => ({ ...s }))); }} />
           {lastJob && !busy && lastJob.status === 'succeeded' && (
             <div className="faint small row" style={{ padding: '0 4px' }}>
               <Icon name="check" size={13} /> {t('editor.lastJob', { msg: lastJob.message || t(`job.kind.${lastJob.kind}`) })}

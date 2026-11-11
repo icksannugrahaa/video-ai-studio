@@ -212,6 +212,36 @@ class Repo:
                 )
         return {"changed_visual": changed_visual, "changed_narration": changed_narration}
 
+    # ── backups (raw rows, restored as they were) ─────────────────────────
+    SCENE_COLUMNS = ("idx", "visual_prompt", "narration", "duration", "version", "clip_status", "clip_file",
+                     "clip_error", "clip_version", "narration_file", "narration_json", "continues",
+                     "clip_gen_seconds", "clip_attempts", "correction")
+
+    def raw_scenes(self, project_id: int) -> list[dict]:
+        rows = self.db.all("SELECT * FROM scenes WHERE project_id = ? ORDER BY idx", (project_id,))
+        return [{k: row.get(k) for k in self.SCENE_COLUMNS} for row in rows]
+
+    def raw_project(self, user_id: int, project_id: int) -> dict | None:
+        return self.db.one("SELECT * FROM projects WHERE id = ? AND user_id = ?", (project_id, user_id))
+
+    def clear_scenes(self, project_id: int) -> None:
+        self.db.execute("DELETE FROM scenes WHERE project_id = ?", (project_id,))
+
+    def restore_project(self, user_id: int, project_id: int, project: dict, scenes: list[dict]) -> None:
+        """Put back a project row's content and its scenes exactly as backed up."""
+        cols = ("title", "prompt", "preset", "target_seconds", "language", "options_json", "status")
+        values = [project[c] for c in cols if c in project]
+        sets = ", ".join(f"{c} = ?" for c in cols if c in project)
+        with self.db.connect() as conn:
+            conn.execute(f"UPDATE projects SET {sets}, updated_at = ? WHERE id = ? AND user_id = ?",
+                         (*values, now(), project_id, user_id))
+            conn.execute("DELETE FROM scenes WHERE project_id = ?", (project_id,))
+            for row in scenes:
+                cols_in = [c for c in self.SCENE_COLUMNS if c in row]
+                conn.execute(f"INSERT INTO scenes(project_id, {', '.join(cols_in)}) "
+                             f"VALUES(?, {', '.join('?' for _ in cols_in)})",
+                             (project_id, *(row[c] for c in cols_in)))
+
     def bump_scene(self, project_id: int, idx: int, correction: str | None = None) -> bool:
         """Force regeneration of one scene's clip. ``correction`` (what the last take
         got wrong) is kept for the next take's prompt; ``None`` leaves it as it is."""

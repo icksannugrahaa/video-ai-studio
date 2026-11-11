@@ -214,11 +214,21 @@ function Dialog({ spec, onClose }) {
           <input autoFocus type={spec.input === 'password' ? 'password' : 'text'} value={value}
             placeholder={spec.placeholder} onChange={(e) => setValue(e.target.value)} style={{ marginBottom: 18 }} />
         )}
-        <div className="actions">
-          <button type="button" className="btn ghost" onClick={() => onClose(null)}>{spec.cancelLabel || t('action.cancel')}</button>
-          <button ref={ok} type="submit" className={`btn ${spec.danger ? 'danger solid' : 'primary'}`}
-            disabled={spec.input && !value.trim()}>{spec.confirmLabel || t('common.continue')}</button>
-        </div>
+        {spec.choices ? (
+          <div className="actions" style={{ flexWrap: 'wrap' }}>
+            <button type="button" className="btn ghost" onClick={() => onClose(null)}>{spec.cancelLabel || t('action.cancel')}</button>
+            {spec.choices.map((c, i) => (
+              <button key={c.value} ref={i === spec.choices.length - 1 ? ok : undefined} type="button"
+                className={`btn ${c.danger ? 'danger' : c.primary ? 'primary' : ''}`} onClick={() => onClose(c.value)}>{c.label}</button>
+            ))}
+          </div>
+        ) : (
+          <div className="actions">
+            <button type="button" className="btn ghost" onClick={() => onClose(null)}>{spec.cancelLabel || t('action.cancel')}</button>
+            <button ref={ok} type="submit" className={`btn ${spec.danger ? 'danger solid' : 'primary'}`}
+              disabled={spec.input && !value.trim()}>{spec.confirmLabel || t('common.continue')}</button>
+          </div>
+        )}
       </form>
     </div>
   );
@@ -232,6 +242,8 @@ export function DialogProvider({ children }) {
   const api = React.useMemo(() => ({
     confirm: (s) => open(s).then(Boolean),
     prompt: (s) => open({ ...s, input: s.input || 'text' }),
+    // choices: [{ value, label, primary?, danger? }] → the chosen value, or null when cancelled
+    choose: (s) => open(s),
   }), [open]);
   return (
     <DialogCtx.Provider value={api}>

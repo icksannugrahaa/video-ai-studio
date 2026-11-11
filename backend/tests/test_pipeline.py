@@ -943,3 +943,54 @@ def test_frame_check_uses_the_vision_model_when_one_is_set(app, client, fake_cli
     _run_jobs(app)
     _rendered(client, app, project["id"])
     assert seen and set(seen) == {"ag/gemini-3.8-flash-low"}
+
+
+@needs_ffmpeg
+def test_backup_restore_and_rebuild_from_scratch(app, client, fake_client, monkeypatch, settings):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
+    _rendered(client, app, pid)
+    root = settings.projects_dir / str(pid)
+    before = client.get(f"/api/projects/{pid}").json()
+    old_clips = [s["clip_file"] for s in before["scenes"]]
+    assert all(old_clips) and (root / "final.mp4").exists()
+
+    made = client.post(f"/api/projects/{pid}/backups", json={"label": "versi pertama"}).json()
+    assert made["scenes"] == 2 and made["clips"] == 2 and made["has_final"] and made["label"] == "versi pertama"
+
+    # Rebuild from scratch with a backup: everything generated is gone, the plan runs again
+    monkeypatch.setattr(fake_client, "storyboard", _bible_board(False, True, True))
+    assert client.post(f"/api/projects/{pid}/plan", json={"reset": True, "backup": True}).status_code == 200
+    assert not (root / "final.mp4").exists() and not any((root / "clips").glob("*"))
+    _run_jobs(app)
+    rebuilt = client.get(f"/api/projects/{pid}").json()
+    assert len(rebuilt["scenes"]) == 3 and all(s["clip_status"] == "pending" for s in rebuilt["scenes"])
+    listed = client.get(f"/api/projects/{pid}/backups").json()
+    assert [b["label"] for b in listed] == ["Sebelum rebuild", "versi pertama"]
+
+    # Restore the first backup: the new scenes are replaced by the backed-up ones
+    restored = client.post(f"/api/projects/{pid}/backups/{made['id']}/restore").json()
+    assert [s["clip_file"] for s in restored["scenes"]] == old_clips
+    assert all(s["clip_status"] == "done" for s in restored["scenes"]) and "final.mp4" in restored["files"]
+    assert all((root / f).exists() for f in old_clips) and (root / "final.mp4").exists()
+
+    assert client.delete(f"/api/projects/{pid}/backups/{made['id']}").status_code == 200
+    assert len(client.get(f"/api/projects/{pid}/backups").json()) == 1
+    assert client.post(f"/api/projects/{pid}/backups/../x/restore").status_code != 200
+    import pytest as _pytest
+    from app import backups as _backups
+    for bad in ("..", "../1", "x" * 30, ""):
+        with _pytest.raises(_backups.BackupError):
+            _backups.load(root, bad)
+    assert client.post(f"/api/projects/{pid}/backups/20260101-000000-abcdef/restore").status_code == 404
+
+
+@needs_ffmpeg
+def test_rebuild_without_backup_just_clears(app, client, fake_client, monkeypatch, settings):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    pid = _planned_chain(app, client, fake_client, monkeypatch, False, True)
+    _rendered(client, app, pid)
+    client.post(f"/api/projects/{pid}/plan", json={"reset": True, "backup": False})
+    _run_jobs(app)
+    assert client.get(f"/api/projects/{pid}/backups").json() == []
+    assert all(s["clip_status"] == "pending" for s in client.get(f"/api/projects/{pid}").json()["scenes"])

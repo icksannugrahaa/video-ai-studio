@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app import backups
 from app.api.deps import current_user, services
 from app.pipeline import planner, presets
 from app.providers import ProviderError
@@ -247,12 +248,84 @@ def put_scenes(project_id: int, body: ScenesBody, user: dict = Depends(current_u
     return {**_detail(svc, user, _project(svc, user, project_id)), "diff": diff}
 
 
+class PlanBody(BaseModel):
+    reset: bool = False   # rebuild: clear every scene and result first (idea, lyrics and song stay)
+    backup: bool = False  # with reset: snapshot the current result before clearing it
+
+
 @router.post("/projects/{project_id}/plan")
-def plan(project_id: int, user: dict = Depends(current_user), svc=Depends(services)):
+def plan(project_id: int, body: PlanBody | None = None, user: dict = Depends(current_user),
+         svc=Depends(services)):
     project = _project(svc, user, project_id)
     if not project["prompt"].strip():
         raise HTTPException(400, "isi prompt / ide video dulu")
+    body = body or PlanBody()
+    if body.reset:
+        if svc.repo.active_job(project["id"]):
+            raise HTTPException(409, "masih ada job berjalan untuk project ini")
+        root = svc.settings.projects_dir / str(project_id)
+        if body.backup and svc.repo.scenes(project_id):
+            _backup(svc, user, project_id, "Sebelum rebuild")
+        svc.repo.clear_scenes(project_id)
+        backups.clear_results(root)
+        svc.repo.update_project(user["id"], project_id, {"status": "draft"})
     return _queue(svc, user, project, "plan")
+
+
+# ── backups ────────────────────────────────────────────────────────────
+class BackupBody(BaseModel):
+    label: str = Field(default="", max_length=80)
+
+
+def _backup(svc, user: dict, project_id: int, label: str) -> dict:
+    try:
+        return backups.create(svc.settings.projects_dir / str(project_id), svc.repo.raw_project(user["id"], project_id),
+                              svc.repo.raw_scenes(project_id), label=label)
+    except OSError as exc:
+        raise HTTPException(507, "backup gagal disimpan (ruang disk?)") from exc
+
+
+@router.get("/projects/{project_id}/backups")
+def list_backups(project_id: int, user: dict = Depends(current_user), svc=Depends(services)):
+    _project(svc, user, project_id)
+    return backups.list_backups(svc.settings.projects_dir / str(project_id))
+
+
+@router.post("/projects/{project_id}/backups")
+def create_backup(project_id: int, body: BackupBody | None = None, user: dict = Depends(current_user),
+                  svc=Depends(services)):
+    project = _project(svc, user, project_id)
+    if svc.repo.active_job(project["id"]):
+        raise HTTPException(409, "tunggu job yang berjalan selesai dulu")
+    if not svc.repo.scenes(project_id):
+        raise HTTPException(400, "belum ada scene untuk dibackup")
+    return _backup(svc, user, project_id, (body or BackupBody()).label)
+
+
+@router.post("/projects/{project_id}/backups/{backup_id}/restore")
+def restore_backup(project_id: int, backup_id: str, user: dict = Depends(current_user), svc=Depends(services)):
+    """Put the backup back: the current scenes and results are replaced by it."""
+    project = _project(svc, user, project_id)
+    if svc.repo.active_job(project["id"]):
+        raise HTTPException(409, "masih ada job berjalan untuk project ini")
+    root = svc.settings.projects_dir / str(project_id)
+    try:
+        manifest = backups.load(root, backup_id)
+        backups.restore_files(root, backup_id)
+    except backups.BackupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    svc.repo.restore_project(user["id"], project_id, manifest["project"], manifest["scenes"])
+    return _detail(svc, user, _project(svc, user, project_id))
+
+
+@router.delete("/projects/{project_id}/backups/{backup_id}")
+def delete_backup(project_id: int, backup_id: str, user: dict = Depends(current_user), svc=Depends(services)):
+    _project(svc, user, project_id)
+    try:
+        backups.delete(svc.settings.projects_dir / str(project_id), backup_id)
+    except backups.BackupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True}
 
 
 @router.post("/projects/{project_id}/render")
