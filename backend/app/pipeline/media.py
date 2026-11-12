@@ -350,6 +350,7 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     # the fps filter doubles one frame and drops the next for seconds at a time
     # (seen live: a 3 % slowdown played at 12 fps). Evenly spaced, a slowdown just
     # repeats a frame now and then.
+    slower = False
     rate = frame_rate(src)
     even = f"settb=1/{round(rate) * 1000},setpts=N/({rate:g}*TB)," if rate else ""  # a clock that holds 1/rate exactly
     if active:
@@ -360,9 +361,11 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
         factor = src_seconds / kept if kept else 1.0
         if 1.0 < factor <= 1.15:  # ≤ 15 % slower is not noticeable; more would be
             stretch = f"trim=end_frame={keep_frames},setpts=(PTS-STARTPTS)*{factor:.5f},"
+            slower = factor > 1.005
     bounce = ""
     if retime and src_seconds and 0.9 <= retime / src_seconds <= 1.8:
         stretch = f"setpts=(PTS-STARTPTS)*{retime / src_seconds:.5f},"
+        slower = retime / src_seconds > 1.005
         src_seconds = retime
     elif retime and src_seconds and retime / src_seconds > 1.8:
         factor = min(1.8, max(1.0, retime / (2 * src_seconds)))
@@ -374,9 +377,12 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     head = min(missing, max(0.0, lead))
     pad = missing - head + 0.1
     tpad = f"tpad=start_mode=clone:start_duration={head:.3f}:" if head > 0 else "tpad="
+    # Slowed down, the fps filter repeats a frame every few (seen live: every 8th at
+    # 12 % slower, a steady judder); framerate blends the in-between frame instead.
+    resample = f"framerate=fps={fps:g}," if slower else f"fps={fps:g},"
     tint = f"colorchannelmixer=rr={gain[0]:.4f}:gg={gain[1]:.4f}:bb={gain[2]:.4f}," if gain else ""
     vf = (f"{even}{tint}{cut}{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
-          f"setsar=1,fps={fps:g},{bounce}{tpad}stop_mode=clone:stop_duration={pad:.3f}")
+          f"setsar=1,{resample}{bounce}{tpad}stop_mode=clone:stop_duration={pad:.3f}")
     args: list = ["-i", src]
     if keep_audio and has_audio(src):
         audio = ["-map", "0:a:0", "-af", f"aresample={AUDIO_RATE},apad"]

@@ -1082,8 +1082,9 @@ def test_a_model_clip_with_uneven_frame_stamps_is_slowed_without_stutter(tmp_pat
     frames = np.frombuffer(raw, np.uint8).reshape(-1, 72 * 128).astype(int)
     steps = np.abs(np.diff(frames, axis=0)).mean(axis=1)
     repeats = np.flatnonzero(steps < np.median(steps) * 0.3)
-    assert len(repeats) <= 6  # 5 % slower: a repeated frame now and then
-    assert not np.any(np.diff(repeats) < 10)  # spread out, never every other frame (seen live: 12 fps runs)
+    # 5 % slower: in-between frames are blended, none repeated (seen live: 12 fps runs,
+    # then a repeat every 8th frame); only the held tail at the very end may repeat
+    assert all(i >= len(steps) - 3 for i in repeats)
 
 
 @needs_ffmpeg
