@@ -32,7 +32,7 @@ function Stepper({ steps }) {
 
 const songMode = (o) => o.music_mode === 'external' && o.music_style === 'song';
 
-function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPreview, previewBusy }) {
+function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPreview, previewBusy, onRecompose }) {
   const t = useT();
   const total = project.scenes.length;
   const o = project.options;
@@ -98,7 +98,12 @@ function NextStep({ project, clipsReady, onTab, onPlan, onRender, onResume, onPr
     icon = 'check';
     title = t('next.doneTitle');
     text = t('next.doneText');
-    actions = <a className="btn primary" href={fileUrl(project.id, 'final.mp4', project.updated_at)} download><Icon name="download" /> {t('next.download')}</a>;
+    actions = (
+      <>
+        <a className="btn primary" href={fileUrl(project.id, 'final.mp4', project.updated_at)} download><Icon name="download" /> {t('next.download')}</a>
+        <Button icon="layers" title={t('music.recomposeHint')} onClick={onRecompose}>{t('music.recompose')}</Button>
+      </>
+    );
   }
   return (
     <div className="card next-cta">
@@ -404,7 +409,8 @@ export default function ProjectEditor({ projectId }) {
           {!busy && (
             <NextStep project={project} clipsReady={clipsReady} onTab={setTab} onPlan={plan}
               onRender={() => startRender(false)} onResume={() => startRender(true)}
-              onPreview={startPreview} previewBusy={previewBusy} />
+              onPreview={startPreview} previewBusy={previewBusy}
+              onRecompose={() => run(() => api.post(`/projects/${projectId}/compose`), t('music.composing'))} />
           )}
           {!busy && hasFinal && <SummaryCard project={project} onSelectScene={selectScene} />}
           <BackupsCard projectId={projectId} hasScenes={project.scenes.length > 0} busy={busy} version={backupsVersion}

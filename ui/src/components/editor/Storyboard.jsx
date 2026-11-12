@@ -238,7 +238,7 @@ export default function Storyboard({ project, scenes, setScenes, dirty, setDirty
         <div className="small muted">
           <b style={{ color: 'var(--text)' }}>{t('sb.sceneCount', { n: scenes.length })}</b> · {fmtDuration(totalSeconds(scenes), t)}
           {failed > 0 && <span style={{ color: 'var(--bad)' }}> · {t('sb.failedCount', { n: failed })}</span>}
-          {timed.length > 0 && <span> · {t('sb.avgPerClip', { dur: fmtClock(avgGen) })}</span>}
+          {timed.length > 0 && <span> · {t('sb.avgPerClip', { time: fmtClock(avgGen) })}</span>}
         </div>
         <div className="row">
           <button className="btn ghost sm" onClick={() => setOpen(allOpen ? new Set() : new Set(scenes.map(keyOf)))}>

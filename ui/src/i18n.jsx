@@ -707,7 +707,7 @@ const DICT = {
     'next.musicTitle': 'Video jadi — tambahkan musik?',
     'next.musicText': 'Buat musiknya di Gemini dari prompt yang sudah disiapkan, upload, lalu gabung ulang.',
     'next.doneTitle': 'Video siap diunggah 🎉',
-    'next.doneText': 'Ubah scene, musik, atau subtitle kapan saja — hanya bagian yang berubah yang diproses ulang.',
+    'next.doneText': 'Ubah scene, musik, atau subtitle kapan saja — hanya bagian yang berubah yang diproses ulang. Gabung ulang video memakai clip yang sudah ada (tanpa generate clip baru).',
     'next.download': 'Unduh MP4',
 
     // Steps (extra)
@@ -1445,7 +1445,7 @@ const DICT = {
     'next.musicTitle': 'Video done — add music?',
     'next.musicText': 'Generate the music in Gemini from the prepared prompt, upload it, then re-merge.',
     'next.doneTitle': 'Video ready to upload 🎉',
-    'next.doneText': 'Change scenes, music, or subtitles anytime — only the changed parts are reprocessed.',
+    'next.doneText': 'Change scenes, music, or subtitles anytime — only the changed parts are reprocessed. Re-merge video reuses the existing clips (no new clips are generated).',
     'next.download': 'Download MP4',
 
     // Steps (extra)
