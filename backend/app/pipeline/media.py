@@ -324,6 +324,11 @@ def seam_colour_gain(prev: Path, nxt: Path) -> tuple[float, float, float]:
     return tuple(b / a if a else 1.0 for b, a in zip(before, after))
 
 
+# Part of each normalised clip's cache key: bump it when normalize_clip changes how
+# it draws a clip, or a re-merge keeps serving clips made the old way.
+NORMALIZE_VERSION = 2
+
+
 def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float, seconds: float,
                    keep_audio: bool, preset: str = "veryfast", lead: float = 0.0,
                    keep_frames: int | None = None, retime: float | None = None,

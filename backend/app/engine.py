@@ -977,7 +977,7 @@ class Engine:
                 # instead of holding it still (a held head reads as a stall at every cut)
                 retime = round(retime + lead, 3)
             keep_frames = None if retime or fades[n - 1] else self._seam(project, scenes, n - 1, ws)
-            key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|{retime}|"
+            key = hashlib.sha1(f"{media.NORMALIZE_VERSION}|{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|{retime}|"
                                f"{preset['width']}x{preset['height']}|"
                                f"{fps:g}|{keep_audio}|{gains[n - 1]}|{active}".encode()).hexdigest()[:10]
             norm = ws.path("norm", f"scene_{scene['idx']}_{key}.mp4")
