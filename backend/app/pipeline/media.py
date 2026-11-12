@@ -326,7 +326,7 @@ def seam_colour_gain(prev: Path, nxt: Path) -> tuple[float, float, float]:
 
 # Part of each normalised clip's cache key: bump it when normalize_clip changes how
 # it draws a clip, or a re-merge keeps serving clips made the old way.
-NORMALIZE_VERSION = 2
+NORMALIZE_VERSION = 3
 
 
 def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float, seconds: float,
@@ -370,7 +370,7 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     bounce = ""
     if retime and src_seconds and 0.9 <= retime / src_seconds <= 1.8:
         stretch = f"setpts=(PTS-STARTPTS)*{retime / src_seconds:.5f},"
-        slower = retime / src_seconds > 1.005
+        slower = abs(retime / src_seconds - 1.0) > 0.005  # faster too: fps would drop a frame now and then
         src_seconds = retime
     elif retime and src_seconds and retime / src_seconds > 1.8:
         factor = min(1.8, max(1.0, retime / (2 * src_seconds)))

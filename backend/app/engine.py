@@ -93,6 +93,53 @@ def scene_transitions(scenes: list[dict], lengths: list[float], options: dict,
     return fades
 
 
+FLEX_SPEED = (0.93, 1.07)  # playback speed range a song-timed clip may get; more reads as slow-motion or rush
+MIN_FLEX_SCENE = 1.0  # seconds; a plan squeezing a scene below this is not used
+FLEX_DRIFT = 0.5  # seconds a cut may land off its lyric line (agreed with the user, 2026-11-12)
+
+
+def flex_plan(slots: list[float], fades: list[float], clips: list[tuple[float, float]]) -> list[dict] | None:
+    """Song mode: where each cut falls and how fast each clip plays.
+
+    Forcing every clip to fill its lyric slot exactly slowed some down (seen live:
+    11 %, heavy and blurred) and cut others short (a 4 s clip in a 3 s slot lost its
+    last second, so the next shot jumped). Here each clip plays at nearly its own
+    speed and ends where its motion stops (``clips`` gives (duration, usable
+    seconds) — usable leaves out a held end before a continuing shot, whose held
+    frames then only cover the outgoing fade); the cut moves off the lyric line by
+    what that leaves over, and the next scenes and finally the closing one take the
+    difference back. Returns per scene ``length`` (seconds on the timeline),
+    ``active`` (source seconds used) and ``speed`` (timeline / source), or ``None``
+    when the plan would squeeze a scene too far."""
+    count = len(slots)
+    total = sum(slots)
+    plan, start, boundary = [], 0.0, 0.0
+    for i, (seconds, usable) in enumerate(clips):
+        fade_in = fades[i - 1] / 2 if i else 0.0
+        fade_out = fades[i] / 2 if i < count - 1 else 0.0
+        boundary += slots[i]
+        active = min(seconds, usable + fade_out)
+        if i == count - 1:
+            length = total - start
+            speed = (length + fade_in) / active if active else 1.0
+            if speed < FLEX_SPEED[0]:  # the closing clip is longer than the song: end it with the song
+                active, speed = length + fade_in, 1.0
+        else:
+            # as close to the clip's own speed as keeps the cut within FLEX_DRIFT of
+            # the lyric line; past that, as close as the speed range allows
+            edges = fade_in + fade_out
+            low = (boundary - FLEX_DRIFT - start + edges) / active if active else 1.0
+            high = (boundary + FLEX_DRIFT - start + edges) / active if active else 1.0
+            speed = min(max(1.0, low), high) if low <= high else 1.0
+            speed = min(FLEX_SPEED[1], max(FLEX_SPEED[0], speed))
+            length = speed * active - edges
+        if length < MIN_FLEX_SCENE:
+            return None
+        plan.append({"length": round(length, 3), "active": round(active, 3), "speed": round(speed, 4)})
+        start += plan[-1]["length"]
+    return plan
+
+
 def trimmed_end(clip_seconds: float, active: float, target: float,
                 min_tail: float = MIN_STILL_TAIL) -> float | None:
     """Where to end a clip that holds its pose after ``active`` seconds so the rest,
@@ -806,6 +853,21 @@ class Engine:
         except media.MediaError:
             return None
 
+    def _flex_plan(self, scenes: list[dict], slots: list[float], fades: list[float], ws) -> list[dict] | None:
+        clips = []
+        try:
+            for i, scene in enumerate(scenes):
+                src = ws.path(scene["clip_file"])
+                seconds = media.duration(src)
+                held = media.still_tail(src) if i + 1 < len(scenes) and scenes[i + 1].get("continues") else 0.0
+                clips.append((seconds, seconds - held))
+        except (media.MediaError, TypeError):
+            return None
+        plan = flex_plan(slots, fades, clips)
+        if plan:
+            log.info("flex timeline: %s", ", ".join(f"{p['length']}s x{p['speed']}" for p in plan))
+        return plan
+
     def _broken_seams(self, project: dict, scenes: list[dict], ws) -> set[int]:
         """Seams after scene ``i`` where the seeded next clip does not match."""
         broken = set()
@@ -946,6 +1008,9 @@ class Engine:
             lengths = timeline
         fades = ([0.0] * len(scenes) if not media.has_filter("xfade")
                  else scene_transitions(scenes, lengths, opts, self._broken_seams(project, scenes, ws)))
+        plan = self._flex_plan(scenes, lengths, fades, ws) if timeline else None
+        if plan:
+            lengths = [p["length"] for p in plan]
         fps = render_fps([ws.path(s["clip_file"]) for s in scenes if s.get("clip_file")], settings.render_fps)
         gains = self._seam_gains(scenes, ws)
         p_start = max(0.3, self.repo.job(job["id"])["progress"])
@@ -959,7 +1024,18 @@ class Engine:
             lead = fades[n - 2] / 2 if n > 1 else 0.0
             retime = seconds if timeline else None
             active = None
-            if n < len(scenes):
+            if plan:
+                # played at its planned speed over the whole clip, the head under the
+                # incoming fade included: nothing held, nothing cut mid-motion
+                step = plan[n - 1]
+                active, lead = step["active"], 0.0
+                retime = clip_seconds if abs(step["speed"] - 1.0) > 0.005 else None
+                try:
+                    if active >= media.duration(ws.path(scene["clip_file"])) - 0.01:
+                        active = None
+                except media.MediaError:
+                    active = None
+            elif n < len(scenes):
                 try:
                     src = ws.path(scene["clip_file"])
                     active = trimmed_end(media.duration(src), media.active_seconds(src), retime or seconds)
@@ -971,7 +1047,8 @@ class Engine:
                                              min_tail=MIN_CUT_TAIL)
                 except media.MediaError:
                     pass
-            retime = (retime or seconds) if active else retime
+            if not plan:
+                retime = (retime or seconds) if active else retime
             if retime and lead:
                 # the clip starts under the incoming fade: play its first frame there
                 # instead of holding it still (a held head reads as a stall at every cut)

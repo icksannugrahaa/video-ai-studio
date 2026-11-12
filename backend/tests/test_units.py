@@ -786,3 +786,22 @@ def test_count_right_ignores_findings_that_are_not_about_the_count():
     assert not planner.count_right("Frame terakhir: apples 5, seharusnya 4, cot tidak terlihat")
     assert not planner.count_right("Frame terakhir: apples in basket 2, seharusnya 3")
     assert not planner.count_right("Frame terakhir belum dicek: model chat tidak menjawab.")
+
+
+def test_flex_plan_keeps_clip_speed_and_moves_the_cuts_instead():
+    from app.engine import FLEX_DRIFT, FLEX_SPEED, flex_plan
+    # project 2 (2026-11-12): 4 s clips with held ends in 4 s slots, a 4 s clip in a 3 s slot, the outro
+    slots = [6.0, 4.0, 4.0, 4.0, 4.0, 3.0, 9.12]
+    fades = [0.2] * 6 + [0.0]
+    clips = [(6.08, 5.66), (4.1, 3.56), (4.1, 3.85), (4.1, 3.85), (4.1, 4.1), (4.1, 4.02), (9.09, 9.09)]
+    plan = flex_plan(slots, fades, clips)
+    assert all(FLEX_SPEED[0] <= p["speed"] <= FLEX_SPEED[1] for p in plan[:-1])
+    assert plan[0]["speed"] == 1.0                       # fits within the drift: its own speed
+    assert plan[5]["active"] == 4.1                      # the 4 s clip in a 3 s slot plays to its end
+    assert abs(sum(p["length"] for p in plan) - sum(slots)) < 0.01  # the song still ends with the video
+    cut, line = 0.0, 0.0
+    for slot, step in zip(slots[:-1], plan[:-1]):
+        cut, line = cut + step["length"], line + slot
+        assert abs(cut - line) < FLEX_DRIFT + 0.15
+    assert plan[1]["active"] == round(3.56 + 0.1, 3)     # the held end only covers the outgoing fade
+    assert flex_plan([4.0, 0.5], [0.0, 0.0], [(4.0, 4.0), (4.0, 4.0)]) is None  # nothing left for the last
