@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import math
 import os
 import shutil
 import threading
@@ -242,7 +243,7 @@ class Engine:
         lyrics = project["options"].get("lyrics") or "" if self._is_song(project) else ""
         board = planner.plan_storyboard(
             client, profile["chat_model"], prompt=project["prompt"], language=project["language"],
-            clip_seconds=int(profile["clip_seconds"]), target_seconds=int(project["target_seconds"]),
+            clip_seconds=self._clip_limit(profile), target_seconds=int(project["target_seconds"]),
             limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
             lyrics=lyrics, song_seconds=media.audible_end(music) if music else None,
         )
@@ -336,7 +337,7 @@ class Engine:
         self._progress(job, 0.05, "Menerapkan instruksi edit…")
         board = planner.edit_storyboard(
             client, profile["chat_model"], storyboard=current, instruction=instruction,
-            language=project["language"], clip_seconds=int(profile["clip_seconds"]),
+            language=project["language"], clip_seconds=self._clip_limit(profile),
             limit_seconds=int(preset["max_seconds"]), aspect=preset["aspect"], song=self._is_song(project),
         )
         diff = self.repo.replace_scenes(project["id"], board["scenes"])
@@ -582,9 +583,47 @@ class Engine:
             frame.unlink(missing_ok=True)
             return None
         try:
-            return self._frame_problems(job, profile, client, scene, frame, checks)
+            found = self._frame_problems(job, profile, client, scene, frame, checks)
+            if found is None and checks.get("count") and (checks.get("visible") or checks.get("held")):
+                # seen live: the full question timed out three times while a count-only one, the
+                # same as the mid-clip checks, was answered; the row is what the next shot starts from
+                log.info("scene %s end check: asking for the row count only", scene["idx"])
+                found = self._frame_problems(job, profile, client, scene, frame,
+                                             {"count": checks["count"], "noun": checks["noun"], "visible": []})
+            return found
         finally:
             frame.unlink(missing_ok=True)
+
+    def _step_problems(self, job, project, profile, client, scene, clip: Path, ws) -> list[str]:
+        """Frames between the placings of a shot that places several counted objects
+        (song mode): a wrong count there is two objects placed at once or one lost,
+        even when the end comes out right. Unanswered checks count as fine: a retake
+        is never billed on a guess."""
+        if not self._is_song(project) or not (profile.get("vision_model") or profile["chat_model"]):
+            return []
+        start, end = self._scene_span(project, scene, ws)
+        placings = planner.placing_times(project["options"].get("lyrics") or "", start, end)
+        try:
+            checks = planner.step_checks(scene["visual_prompt"], placings, media.duration(clip))
+        except media.MediaError:
+            return []
+        found: list[str] = []
+        for at, want, noun in checks:
+            frame = clip.with_name(f"{clip.stem}_at{int(at * 100)}.jpg")
+            try:
+                media.frame_at(clip, at, frame)
+                reply = self._ask_frame(job, profile, client, scene, frame,
+                                        planner.end_question({"count": want, "noun": noun, "visible": []}),
+                                        delays=(5,))
+            except media.MediaError:
+                continue
+            finally:
+                frame.unlink(missing_ok=True)
+            if reply is not None:
+                found += planner.step_problems(at, want, noun, reply)
+        if checks:
+            log.info("scene %s step checks at %s: %s", scene["idx"], [c[0] for c in checks], found or "ok")
+        return found
 
     def _frame_problems(self, job, profile, client, scene, frame: Path, checks: dict | None) -> list[str] | None:
         """Ask the vision model (else the chat model) what one frame shows against
@@ -623,53 +662,58 @@ class Engine:
 
     # counting rig -------------------------------------------------------
     def _rig_frames(self, job, project, profile, client, chain, scene, ws, state: dict):
-        """(first, last) frames drawn by :mod:`rig` for a continuing counting shot:
-        exactly the count its START and END name, cut from the last clip of the
-        sequence that was checked to end right. ``None`` → the usual frames."""
+        """(first, last) frames drawn by :mod:`rig` for a continuing counting shot,
+        from the latest clip of the sequence that was checked to end right (so
+        usually the previous clip itself: its own last frame, never an older pose).
+        ``None`` → the usual frames.
+
+        A last frame is drawn only for a single placing: seen live, a drawn row
+        spaced unlike the one the model laid out made it drag five apples into new
+        spots in the last second. It is skipped too when the shot counts what is
+        left in the container, which the rig cannot take out."""
         counts = planner.row_counts(scene["visual_prompt"])
         if not counts or not (profile.get("vision_model") or profile["chat_model"]):
             return None
         first, final, noun = counts
-        made = state.get(noun)
-        if made is None:
-            made = self._build_rig(job, project, profile, client, chain, scene, ws, state, noun)
-            if made is None:
-                return None
-            state[noun] = made
-        if not made.count <= first <= final <= made.capacity:
+        made = self._build_rig(job, project, profile, client, chain, scene, ws, state, noun)
+        if made is None or not made.count <= first <= final <= made.capacity:
             return None
+        held = bool((planner.end_checks(scene["visual_prompt"]) or {}).get("held"))
+        if held and made.count != first:
+            return None  # its container would still show the older count
         out = []
         for kind, count in (("start", first), ("end", final)):
-            if kind == "end" and final == first:
+            if kind == "end" and (final - first != 1 or held):
                 out.append(None)
                 continue
             path = ws.path("keyframes", f"scene_{scene['idx']}_v{scene['version']}_rig_{kind}.png")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(rig.compose(made, count))
             out.append(path.read_bytes())
-        log.info("scene %s: rig frames %s -> %s %s", scene["idx"], first, final, noun)
+        log.info("scene %s: rig frames %s -> %s %s%s", scene["idx"], first, final, noun,
+                 "" if out[1] else " (no drawn end)")
         return out[0], out[1]
 
     def _build_rig(self, job, project, profile, client, chain, scene, ws, state: dict, noun: str):
         """A rig from the latest earlier clip of the chain whose end was checked and
         counted right (a container the vision model did not recognise does not
-        matter here) with a row of ``noun``; each clip is tried once per job."""
+        matter here) with a row of ``noun``; each clip is looked at once per job."""
         total = max((c[1] for s in chain if (c := planner.row_counts(s["visual_prompt"])) and c[2] == noun),
                     default=0)
         current = {s["id"]: s for s in self.repo.scenes(project["id"])}
-        tried = state.setdefault("_tried", set())
+        rigs = state.setdefault("_rigs", {})
         for s in reversed([current[c["id"]] for c in chain if c["idx"] < scene["idx"] and c["id"] in current]):
             checks = planner.end_checks(s["visual_prompt"])
             if (s["clip_status"] != "done" or not planner.count_right(s.get("clip_error")) or not s.get("clip_file")
                     or not ws.path(s["clip_file"]).exists() or not checks or checks["noun"] != noun
-                    or not checks["count"] or s["clip_file"] in tried):
+                    or not checks["count"]):
                 continue
-            tried.add(s["clip_file"])
-            self._progress(job, self.repo.job(job["id"])["progress"],
-                           f"Scene {scene['idx'] + 1}: menyiapkan frame hitungan dari scene {s['idx'] + 1}…")
-            made = self._rig_from(job, profile, client, s, ws, checks, total)
-            if made is not None:
-                return made
+            if s["clip_file"] not in rigs:
+                self._progress(job, self.repo.job(job["id"])["progress"],
+                               f"Scene {scene['idx'] + 1}: menyiapkan frame hitungan dari scene {s['idx'] + 1}…")
+                rigs[s["clip_file"]] = self._rig_from(job, profile, client, s, ws, checks, total)
+            if rigs[s["clip_file"]] is not None:
+                return rigs[s["clip_file"]]
         return None
 
     def _rig_from(self, job, profile, client, scene, ws, checks: dict, total: int):
@@ -789,53 +833,82 @@ class Engine:
 
     def _retake_broken(self, job, project, profile, client, preset, scene, ws, seed, last=None) -> None:
         """A clip that left its seed or ends without what its shot promises gets one
-        more (billed) try; the better of the two stays and what is still wrong is
-        shown on the scene. The first clip is already saved, so a failed retake
-        costs nothing. A last frame the chat model could not check is flagged on
-        the scene (no retake is billed on a guess)."""
+        more (billed) try; the best take stays and what is still wrong is shown on
+        the scene. The first clip is already saved, so a failed retake costs
+        nothing. A last frame the chat model could not check is flagged on the scene
+        (no retake is billed on a guess), and what a container holds is only noted.
+
+        A counted row that still ends wrong gets a third take, and when it is still
+        wrong while the next shot starts from it, the render stops here (raises
+        :class:`JobFailed`): seen live, a row of three where two belonged made every
+        later shot count wrong too, each one billed."""
         prev = self._previous_clip(project, scene, ws)
         scenes = self.repo.scenes(project["id"])
         first = next(s for s in scenes if s["id"] == scene["id"])
         checks = planner.sequence_checks(scenes, first)
+        notes: dict[str, list[str]] = {}
 
-        def flaws(clip: Path) -> tuple[list[str] | None, float]:
+        def flaws(clip: Path) -> tuple[Path, list[str] | None, float]:
             gap = media.seam_gap(prev, clip) if seed is not None and prev else 0.0
-            return self._end_state_problems(job, profile, client, scene, clip, checks), gap
+            found = self._end_state_problems(job, profile, client, scene, clip, checks)
+            steps = self._step_problems(job, project, profile, client, scene, clip, ws)
+            notes[clip.name] = steps
+            return clip, (None if found is None else found + steps), gap
 
-        def note(found: list[str] | None) -> str | None:
-            if found is None:
+        def rank(take) -> tuple:
+            wrong = planner.blocking(take[1] or [])
+            return planner.row_wrong(wrong), bool(wrong), take[2]
+
+        def note(take) -> str | None:
+            if take[1] is None:
                 return UNCHECKED_NOTE
-            return f"Frame terakhir: {', '.join(found)}"[:300] if found else None
+            steps = notes.get(take[0].name) or []
+            return planner.findings_note([f for f in take[1] if f not in steps], steps)
 
-        left: list[str] | None = []
+        best = (ws.path(first["clip_file"]), [], 0.0)
+        made: list[Path] = []
         try:
-            left, gap = flaws(ws.path(first["clip_file"]))
-            if not left and gap <= media.SEAM_BREAK:
-                return
-            self._progress(job, self.repo.job(job["id"])["progress"],
-                           f"Scene {scene['idx'] + 1} tidak sesuai, generate ulang sekali…")
-            self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
-            video = self._request_clip(job, project, profile, client, preset, scene, ws, seed, last)
-            name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake.{video.ext}"
-            ws.path(name).write_bytes(video.data)
-            retake_left, retake_gap = flaws(ws.path(name))
-            closer = (bool(retake_left), retake_gap) < (bool(left), gap)
-            if closer:
-                left = retake_left
+            best = flaws(best[0])
+            for extra in (1, 2):
+                wrong = planner.blocking(best[1] or [])
+                if (not wrong and best[2] <= media.SEAM_BREAK) or (extra == 2 and not planner.row_wrong(wrong)):
+                    break
+                self._progress(job, self.repo.job(job["id"])["progress"],
+                               f"Scene {scene['idx'] + 1} tidak sesuai, generate ulang"
+                               + (" sekali…" if extra == 1 else " lagi (jumlah masih salah)…"))
+                self.repo.update_scene(scene["id"], clip_status="running")  # the UI must not show it as finished
+                video = self._request_clip(job, project, profile, client, preset, scene, ws, seed, last)
+                name = f"clips/scene_{scene['idx']}_v{scene['version']}_retake{'' if extra == 1 else extra}.{video.ext}"
+                ws.path(name).write_bytes(video.data)
+                made.append(ws.path(name))
+                take = flaws(ws.path(name))
+                if rank(take) < rank(best):
+                    best = take
         except ProviderError as exc:
             if exc.status == 499:
                 raise JobCanceled() from exc
             log.warning("scene %s retake failed", scene["idx"])
-            return
         except media.MediaError:
             log.warning("scene %s retake unreadable", scene["idx"])
-            return
         finally:
-            self.repo.update_scene(scene["id"], clip_status="done", clip_error=note(left))
-        loser = first["clip_file"] if closer else name
-        if closer:
-            self.repo.update_scene(scene["id"], clip_file=name, clip_attempts=(first["clip_attempts"] or 0) + 1)
-        ws.path(loser).unlink(missing_ok=True)
+            self.repo.update_scene(scene["id"], clip_status="done", clip_error=note(best))
+        if best[0] != ws.path(first["clip_file"]):
+            self.repo.update_scene(scene["id"], clip_file=str(best[0].relative_to(ws.path())),
+                                   clip_attempts=(first["clip_attempts"] or 0) + len(made))
+        for clip in [ws.path(first["clip_file"]), *made]:
+            if clip != best[0]:
+                clip.unlink(missing_ok=True)
+        wrong = planner.blocking(best[1] or [])
+        nxt = next((s for s in scenes if s["idx"] == scene["idx"] + 1), None)
+        seeds_next = bool(nxt and nxt.get("continues") and project["options"].get("continuity"))
+        if seeds_next and best[1] is None and checks and checks.get("count"):
+            raise JobFailed(f"Scene {scene['idx'] + 1}: jumlah di frame terakhirnya belum bisa dicek (model vision "
+                            "tidak menjawab). Render dihentikan supaya scene berikutnya tidak mulai dari hitungan "
+                            "yang belum pasti; periksa scene ini, lalu lanjutkan render atau generate ulang.")
+        if planner.row_wrong(wrong) and seeds_next:
+            raise JobFailed(f"Scene {scene['idx'] + 1}: jumlah masih salah setelah {len(made) + 1} take "
+                            f"({', '.join(f for f in wrong if planner.row_wrong([f]))}). Render dihentikan supaya "
+                            "scene berikutnya tidak ikut salah; periksa scene ini lalu generate ulang.")
 
     def _seam(self, project: dict, scenes: list[dict], i: int, ws) -> int | None:
         """Frames of clip ``i`` to keep so it ends where the next, seeded clip
@@ -912,25 +985,36 @@ class Engine:
             lengths = planner.fit_lengths([float(s["duration"]) for s in scenes], seconds)
         return lengths
 
+    @staticmethod
+    def _clip_limit(profile: dict) -> int:
+        return planner.clip_limit(profile.get("video_model") or "", profile.get("clip_seconds"))
+
     def _clip_seconds(self, project: dict, profile: dict, scene: dict, ws) -> int:
-        """Length to request: the part of the song this clip covers, when known."""
-        limit = int(profile["clip_seconds"])
+        """Length to request: the part of the song this clip covers, when known,
+        rounded up (a clip a little too long loses its still end at the cut; one
+        too short has to be slowed down)."""
+        limit = self._clip_limit(profile)
         ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
         timeline = self._song_timeline(project, ordered, ws)
         at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
-        wanted = min(timeline[at], limit) if timeline else scene["duration"]
-        return max(int(round(wanted)), planner.min_clip_seconds(limit))
+        wanted = timeline[at] if timeline else float(scene["duration"])
+        return max(min(math.ceil(wanted - 0.2), limit), planner.min_clip_seconds(limit))
+
+    def _scene_span(self, project: dict, scene: dict, ws) -> tuple[float, float]:
+        """(start, end) of the scene on the video's timeline."""
+        ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
+        lengths = self._song_timeline(project, ordered, ws) or [float(s["duration"]) for s in ordered]
+        at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
+        start = sum(lengths[:at])
+        return start, start + lengths[at]
 
     def _sung_during(self, project: dict, scene: dict, ws) -> str:
         """Song mode: the lyric lines (and tempo) heard during this scene, so the
         clip acts out what is sung instead of a generic dance."""
         if not self._is_song(project):
             return ""
-        ordered = sorted(self.repo.scenes(project["id"]), key=lambda s: s["idx"])
-        lengths = self._song_timeline(project, ordered, ws) or [float(s["duration"]) for s in ordered]
-        at = next(i for i, s in enumerate(ordered) if s["idx"] == scene["idx"])
-        start = sum(lengths[:at])
-        return planner.sung_direction(project["options"], start, start + lengths[at])
+        start, end = self._scene_span(project, scene, ws)
+        return planner.sung_direction(project["options"], start, end)
 
     @staticmethod
     def _is_song(project: dict) -> bool:

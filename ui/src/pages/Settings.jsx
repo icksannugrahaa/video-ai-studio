@@ -7,6 +7,16 @@ import { useT, useI18n } from '../i18n.jsx';
 const EMPTY = { name: '', base_url: 'https://ai.sandroid.works', api_key: '', chat_model: '', video_model: '',
   tts_model: '', image_model: '', vision_model: '', tts_voice: '', clip_seconds: 5 };
 
+// Clip lengths the video model accepts (mirrors planner.CLIP_RANGES): the render
+// keeps every clip inside them whatever is typed here.
+const CLIP_RANGES = [['seedance-2.5', 4, 30], ['seedance-2.0', 4, 15]];
+
+export function clipRange(model) {
+  const name = (model || '').toLowerCase();
+  const hit = CLIP_RANGES.find(([key]) => name.includes(key));
+  return hit ? { min: hit[1], max: hit[2] } : null;
+}
+
 function groupByProvider(models, noPrefix) {
   const groups = new Map();
   for (const id of models) {
@@ -59,6 +69,7 @@ function ProfileForm({ initial, onSaved, onCancel }) {
   const [modelError, setModelError] = React.useState('');
   const [saving, setSaving] = React.useState(false);
   const set = (key) => (value) => setForm((f) => ({ ...f, [key]: value }));
+  const range = clipRange(form.video_model);
   const canProbe = form.base_url && (form.api_key || initial?.id);
 
   async function save(e) {
@@ -148,7 +159,10 @@ function ProfileForm({ initial, onSaved, onCancel }) {
               <input value={form.tts_voice} placeholder={t('settings.ttsVoicePlaceholder')} onChange={(e) => set('tts_voice')(e.target.value)} />
             </label>
             <label className="field"><span>{t('settings.clipSeconds')} <span className="hint">{t('settings.clipSecondsHint')}</span></span>
-              <input type="number" min={2} max={30} value={form.clip_seconds} onChange={(e) => set('clip_seconds')(e.target.value)} />
+              <input type="number" min={range ? range.min : 2} max={range ? range.max : 30} value={form.clip_seconds}
+                onChange={(e) => set('clip_seconds')(e.target.value)} />
+              {range && <span className="hint">{t('settings.clipRange', { min: range.min, max: range.max })}
+                {Number(form.clip_seconds) >= 8 ? ` ${t('settings.clipSteps')}` : ''}</span>}
             </label>
           </div>
         </div></div>

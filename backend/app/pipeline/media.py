@@ -158,6 +158,14 @@ def last_frame_png(video: Path, out_png: Path) -> Path:
     return Path(out_png)
 
 
+def frame_at(video: Path, seconds: float, out_image: Path) -> Path:
+    """The frame shown ``seconds`` into the clip (decoded, not the nearest keyframe)."""
+    _run(["-i", video, "-ss", f"{max(0.0, seconds):.3f}", "-frames:v", "1", "-q:v", "2", out_image])
+    if not Path(out_image).exists():
+        raise MediaError("gagal mengambil frame")
+    return Path(out_image)
+
+
 def first_frame_png(video: Path, out_png: Path) -> Path:
     """The clip's first frame (what it started from)."""
     _run(["-i", video, "-frames:v", "1", out_png])

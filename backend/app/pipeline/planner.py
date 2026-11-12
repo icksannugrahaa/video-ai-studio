@@ -74,19 +74,20 @@ One clear main action per scene (4-5 seconds is too short for more), described w
   untouched>. END: <the last frame, in the same terms as START>."
   Counted objects: START says "exactly three large red apples in a row on the table"; ACTION brings
   exactly one more from a named place and says the others do not move; END says "exactly four ...". The count in END must
-  equal the count in START plus what ACTION adds. ONE counting step per shot: ACTION moves exactly one counted object,
-  so counting from 0 to 5 takes five shots (plus an opening and a closing shot when the idea needs them); never two
-  placings in one shot, because the video model loses or doubles objects when one clip holds several. Without a song the placing is done by the third second of the clip; in a song the
-  placing falls on the lyric line of the number it brings the count to. The hands then leave the objects alone until END
-  while the characters keep moving gently, so the action lasts to the last frame. The named place is a story object too:
-  a deep, opaque container whose high rim hides what is inside (e.g. "a deep woven basket"), because a heap of loose
-  objects cannot be kept at an exact number; never a flat tray, plate, mat or bed. Put it BESIDE the surface the row is on,
+  equal the count in START plus what ACTION adds. {counting} The hands then leave the objects alone until END
+  while the characters keep moving naturally to the beat, so the action lasts to the last frame. The named place is a story object too:
+  an open, low, solid container (e.g. "a low open woven basket") in which the objects it holds lie side by side in ONE
+  layer, every one of them fully visible from the camera, never heaped; never a wire or see-through basket, a deep
+  bucket, a flat tray, plate, mat or bed. Put it BESIDE the surface the row is on,
   never on it (e.g. "on a low stool touching the right end of the table"), with nobody in front of it, never behind a
   person or at the edge of the frame, so the whole surface stays free for the row, and always write it with its full
   location (never a shorthand like "right-end basket"). START and END of this shot and of every later shot in the
-  sequence state where it is but NEVER how many objects it holds (e.g. "exactly three large red apples in a row on the
-  table; a deep woven basket on a low stool touching the right end of the table"), so it never vanishes and later
-  shots take from the same spot; only the row is counted. ACTION says the hand takes each object from it ("takes one
+  sequence state where it is AND exactly how many objects it still holds, which goes down by one for every object
+  placed (e.g. "exactly three large red apples in a row on the table; exactly two large red apples in a low open woven
+  basket on a low stool touching the right end of the table"), so it never vanishes, later shots take from the same
+  spot, and the viewer sees the basket empty as the row grows. The first shot of the sequence shows it holding the
+  whole amount that will be counted (e.g. exactly five apples in it), and the row plus the container always add up to
+  that amount. ACTION says the hand takes each object from it ("takes one
   apple from the basket, places it ...") so nothing appears from nowhere, always naming the object, and END is the pose
   ACTION finishes in, the same pose in every shot of the sequence (e.g. hands lowered). ACTION names each object's spot
   from the object before it ("directly to the right of the third apple"), never "the next empty spot". The first shot of
@@ -138,22 +139,36 @@ BIBLE_KEYS = ("character", "world", "style")
 
 
 # Added to every clip: what separates a filmed shot from typical AI video.
+# Never dropped for a prompt limit: seen live, a trimmed prompt without it gave apples that changed shape and colour.
+SHOT_STABLE = ("Faces, hands and objects keep their shape, size and colour from the first to the last frame, with no "
+               "morphing or flicker, and the number of objects changes only by what the action itself adds or removes.")
+# Never dropped either: seen live, "gently" in the rules gave floaty, slow-motion looking clips.
+REAL_TIME = ("Everything moves at natural real-time speed with lively timing: never slow motion, no floaty or dragged "
+             "movement.")
 SHOT_CRAFT = ("Professional production: one continuous take with no cuts, believable weight and timing in every "
-              "movement, smooth motivated camera work, steady light and exposure. Faces, hands and objects keep their "
-              "shape from the first to the last frame, with no morphing or flicker, and the number of objects changes "
-              "only by what the action itself adds or removes. Each object the action adds is brought in and placed once, "
+              "movement, smooth motivated camera work, steady light and exposure. Each object the action adds is brought in and placed once, "
               "never repeated, exactly at the spot the action names; a row only grows on the side the action says. After "
               "the last placing no further object enters the frame, none is stacked unless the shot says so, and the "
               "objects stay exactly as they are until the last frame. Every object and container named in the shot "
               "stays in view in its place.")
+ONE_AT_A_TIME = ("The objects are placed strictly one after another: each one is taken, set down at its spot and let "
+                 "go, and the hands come back before the next one is taken. Never two objects in the hands or in the "
+                 "air at once, and none appears without being carried in.")
+# Seen live: placings landed 1-6 s after their sung number when the hand only set off on it.
+# Seen live: "already taking the next object" without a limit made the hand fetch one more after the last placing.
+SONG_REACH = ("Each placing the action names is timed to land ON its sung number: for those placings only, the hand "
+              "already takes the object from its place just before the number is sung, so it touches down as the "
+              "number is sung, never later. Each take-and-place is one quick, natural movement of about one second. "
+              "After the last placing the action names, the hands never go back to the place the objects come from "
+              "and no further object is taken.")
 SONG_PLACING = ("Each object is set down as the number it brings the count to is sung, one object per sung number, and "
                 "none at any other time. After the last placing the hands stay off the objects and the characters keep "
-                "singing and swaying gently until the last frame, never freezing.")
+                "singing and bobbing to the beat until the last frame, never freezing.")
 CAMERA_LOCK = ("The camera is fixed on a tripod: no pan, tilt, zoom, push-in, pull-back or drift; the walls, windows and "
                "table edges keep the same position in the frame from the first to the last frame.")
 _STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera (?:stays )?still|fixed (?:camera|[\w-]* ?shot)|static camera)\b", re.I)
 ENDING_SHOT = ("The last frame is supplied as well: the action ends exactly on it, with every object where it "
-               "shows it; move naturally from the first image to the last one, and keep everyone gently moving "
+               "shows it; move naturally from the first image to the last one, and keep everyone moving at natural speed "
                "until the very last frame instead of stopping early to wait for it.")
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
                "positions. Every object in the image is there from the first frame and stays in place; "
@@ -205,7 +220,7 @@ def keep_sources(scenes: list[dict]) -> None:
             sources.setdefault(found.group(1).split()[-1].lower(), f"{found.group(1)}{found.group(2) or ''}")
         for word, place in sources.items():
             spot = "" if " " in place else ", closest to the camera"
-            note = f"The {place} stays in clear view{spot}, unmoved; its contents are not counted above."
+            note = f"The {place} stays in clear view{spot}, unmoved."
             if not _is_placed(end.group(1), word):
                 text = f"{text.rstrip()} {note}"
             if not _is_placed(start.group(0), word):
@@ -245,18 +260,58 @@ def _number(word: str) -> int | None:
     return int(word) if word.isdigit() else _NUMBERS.get(word.lower())
 
 
+_NOT_CONTAINERS = {"layer", "layers", "row", "rows", "line", "lines", "column", "columns", "circle", "circles",
+                   "group", "groups", "pair", "pairs", "hand", "hands", "air", "view", "frame", "front", "middle",
+                   "center", "centre", "place", "spot", "order", "turn"}
+_PLACE_STOP = r"(?:on|at|by|near|beside|under|behind|touching|next|against|is|stays|remains|holding|holds)"
+_INSIDE_RE = re.compile(r"\b(?:in|inside|within)\s+(?:[a-z\u2019'-]+\s+){0,8}?([a-z]+)(?=\s+" + _PLACE_STOP
+                        + r"\b|\s*,|\s*$)", re.I)
+_CLAUSE_HEAD_RE = re.compile(r"^\s*(?:and\s+)?(?:(?:a|an|the)\s+)?(?:[a-z\u2019'-]+\s+){0,5}?([a-z]+)(?=\s+"
+                             + _PLACE_STOP + r"\b|\s*,)", re.I)
+_CLAUSE_EMPTY_RE = re.compile(r"\b(?:is|stays|remains|now|left|lies|sits|stands)\s+empty\b|\bholding\s+(?:zero|no)\b",
+                              re.I)
+_EXACT_RE = re.compile(r"\bexactly (\d+|" + "|".join(_NUMBERS) + r")\b", re.I)
+
+
+def _container_of(text: str) -> str | None:
+    """The container a clause puts its objects in ("... in one layer inside a low
+    open woven basket on a stool" → basket); rows and layers are no containers."""
+    found = [m.group(1).lower() for m in _INSIDE_RE.finditer(text)]
+    found = [w for w in found if w not in _NOT_CONTAINERS]
+    return found[-1] if found else None
+
+
+def _clause_counts(state: str, inside: dict, held: list) -> None:
+    """Container counts written the way planners write them in full sentences:
+    "exactly three remain fully visible inside the basket", "the basket on the
+    stool is empty, holding zero apples"."""
+    for clause in re.split(r"[;.]", state):
+        exact = _EXACT_RE.search(clause)
+        if exact:
+            place = _container_of(clause[exact.end():])
+            if place:
+                inside.setdefault(place, _number(exact.group(1)))
+                held.append(place)
+        if _CLAUSE_EMPTY_RE.search(clause):
+            head = _CLAUSE_HEAD_RE.match(clause)
+            if head and head.group(1).lower() not in _NOT_CONTAINERS:
+                inside.setdefault(head.group(1).lower(), 0)
+                held.append(head.group(1).lower())
+
+
 def _state_checks(state: str, action: str = "") -> dict | None:
     # "exactly five apples in a basket" counts what a container holds, not what lies in view
     count, held, inside, held_noun = None, [], {}, ""
     for m in _COUNT_RE.finditer(state):
-        if not _IN_CONTAINER_RE.match(state[m.end():]):
+        rest = re.split(r"[;.]|\bexactly\b|\band\b", state[m.end():], maxsplit=1)[0]  # this count's own words
+        name = _CONTAINER_NAME_RE.match(state[m.end():]) if _IN_CONTAINER_RE.match(state[m.end():]) else None
+        place = name.group(1).lower() if name else _container_of(rest)
+        if not place:
             count = count or m
             continue
-        place = _CONTAINER_NAME_RE.match(state[m.end():])
-        if place:
-            held.append(place.group(1).lower())
-            inside[place.group(1).lower()] = _number(m.group(1))
-            held_noun = held_noun or m.group(2).lower()
+        held.append(place)
+        inside[place] = _number(m.group(1))
+        held_noun = held_noun or m.group(2).lower()
     for m in _HELD_RE.finditer(state):  # "exactly three in the tray"
         inside.setdefault(m.group(2).lower(), _number(m.group(1)))
     for m in _LEFT_IN_RE.finditer(state):  # "tray empty"
@@ -264,6 +319,8 @@ def _state_checks(state: str, action: str = "") -> dict | None:
             inside.setdefault(m.group(2).lower(), 0)
     for m in _NOW_EMPTY_RE.finditer(state):  # "the tray on the table, nearest camera, is empty"
         inside.setdefault(m.group(1).lower(), 0)
+    if not inside:
+        _clause_counts(state, inside, held)
     words = [m.group(1).split()[-1].lower() for m in _SOURCE_RE.finditer(action)] if action else []
     words += [m.group(1).split()[-1].lower() for m in _KEPT_RE.finditer(state)]
     words += [(m.group(1) or m.group(2)).lower() for m in _LEFT_IN_RE.finditer(state)] + held
@@ -337,31 +394,95 @@ def end_frame_prompt(options: dict, visual_prompt: str) -> str:
 
 _FINDING_COUNT_RE = re.compile(r"([a-z-]+(?: in [a-z-]+)?) (\d+), seharusnya (\d+)")
 _FINDING_MISSING_RE = re.compile(r"([a-z-]+) tidak terlihat")
+_FINDING_STEP_RE = re.compile(r"detik (\d+(?:\.\d+)?): ([a-z-]+) (\d+), seharusnya (\d+)")
+END_NOTE = "Frame terakhir"
+STEP_NOTE = "Tengah clip"  # a frame between two placings of a multi-step shot
+
+
+def findings_note(end_found: list[str] | None, step_found: list[str] | None = None) -> str | None:
+    """The scene note for what a clip's checked frames lack (``None``: nothing)."""
+    parts = []
+    if end_found:
+        parts.append(f"{END_NOTE}: {', '.join(end_found)}")
+    if step_found:
+        parts.append(f"{STEP_NOTE}: {', '.join(step_found)}")
+    return " · ".join(parts)[:300] or None
+
+
+def _note_sections(clip_error: str | None) -> dict[str, str]:
+    sections = {}
+    for part in (clip_error or "").split(" · "):
+        head, _, body = part.partition(": ")
+        if head in (END_NOTE, STEP_NOTE) and body:
+            sections[head] = body
+    return sections
 
 
 def correction_note(clip_error: str | None) -> str | None:
-    """The last take's end-state findings ("apples 4, seharusnya 5") as an order for
-    the next take; ``None`` when the clip had no such finding."""
-    if not clip_error or not clip_error.startswith("Frame terakhir:"):
-        return None
-    body = clip_error.split(":", 1)[1]
+    """The last take's findings ("apples 4, seharusnya 5") as an order for the
+    next take; ``None`` when the clip had no such finding."""
+    sections = _note_sections(clip_error)
+    body = sections.get(END_NOTE, "")
     said = [f"{seen} {noun} instead of {want}" for noun, seen, want in _FINDING_COUNT_RE.findall(body)]
     said += [f"no {noun} in view" for noun in _FINDING_MISSING_RE.findall(body)]
+    said += [f"{seen} {noun} instead of {want} at second {float(t):.0f}"
+             for t, noun, seen, want in _FINDING_STEP_RE.findall(sections.get(STEP_NOTE, ""))]
     if not said:
         return None
-    return (f"A previous take of this shot ended wrong ({'; '.join(said)}). This take must end exactly as END says: "
-            "no object disappears, none is added, and every place that holds objects stays in view.")
+    return (f"A previous take of this shot went wrong ({'; '.join(said)}). In this take every object is placed one at "
+            "a time, exactly when its number is due, and it must end exactly as END says: no object disappears, none "
+            "is added, and every place that holds objects stays in view.")
+
+
+_HELD_FINDING_RE = re.compile(r"^[a-z-]+ in [a-z-]+ \d+, seharusnya \d+$")
+_ROW_FINDING_RE = re.compile(r"^[a-z-]+ \d+, seharusnya \d+$")
+
+
+def blocking(found: list[str]) -> list[str]:
+    """Findings worth a billed retake. What a container holds is only noted: seen
+    live, models heap the objects in it and a heap is miscounted both ways."""
+    return [f for f in found if not _HELD_FINDING_RE.match(f)]
+
+
+def row_wrong(found: list[str]) -> bool:
+    """Whether the counted row itself ended wrong (not a container, not a moment
+    mid clip): the next shot would start from the wrong number."""
+    return any(_ROW_FINDING_RE.match(f) for f in found)
 
 
 def count_right(clip_error: str | None) -> bool:
     """Whether a clip's end was checked and showed the right count: no note at all,
     or end-state findings that are not about a count (e.g. "cot tidak terlihat",
-    seen live for an odd container the vision model never recognised)."""
+    seen live for an odd container the vision model never recognised). Findings
+    from the middle of the clip do not matter: the end is what is reused."""
     if not clip_error:
         return True
-    if not clip_error.startswith("Frame terakhir:"):
+    sections = _note_sections(clip_error)
+    if not sections:
         return False
-    return not _FINDING_COUNT_RE.search(clip_error.split(":", 1)[1])
+    return not any(" in " not in m.group(1) for m in _FINDING_COUNT_RE.finditer(sections.get(END_NOTE, "")))
+
+
+def step_checks(visual_prompt: str, placings: list[float], seconds: float) -> list[tuple[float, int, str]]:
+    """``(second, count, noun)`` to look at between the placings of a shot that
+    places several counted objects: halfway between two sung counting steps the
+    row must hold the count the earlier one brought it to. Nothing to check for a
+    single step, or when the song does not give one line per step."""
+    counts = row_counts(visual_prompt)
+    if not counts or counts[1] - counts[0] < 2 or len(placings) != counts[1] - counts[0]:
+        return []
+    first, _, noun = counts
+    return [(round((a + b) / 2, 2), first + i + 1, noun)
+            for i, (a, b) in enumerate(zip(placings, placings[1:])) if (a + b) / 2 < seconds - 0.3]
+
+
+def step_problems(at: float, want: int, noun: str, reply: dict) -> list[str]:
+    """A frame between two placings: one fewer is still fine (the hand may be a
+    beat late), more means two were placed at once, two fewer means one was lost."""
+    seen = reply.get("count")
+    if not isinstance(seen, int) or isinstance(seen, bool) or want - 1 <= seen <= want:
+        return []
+    return [f"detik {at:.1f}: {noun} {seen}, seharusnya {want}"]
 
 
 def sequence_checks(scenes: list[dict], scene: dict) -> dict | None:
@@ -412,16 +533,17 @@ def boxes_question(noun: str, container: str | None = None) -> str:
 
 def row_counts(visual_prompt: str) -> tuple[int, int, str] | None:
     """(count at START, count at END, noun) of a shot whose row of counted objects
-    grows by at most one; ``None`` for any other shot."""
+    grows by at most :data:`MAX_COUNT_STEPS`; ``None`` for any other shot."""
     end = end_checks(visual_prompt)
     if not (end and end["count"]):
         return None
     start = start_checks(visual_prompt)
     if start and start["count"] and start["noun"] == end["noun"]:
         first = start["count"]
-    else:
-        first = end["count"] - 1 if moves_objects(visual_prompt) else end["count"]
-    return (first, end["count"], end["noun"]) if 0 <= end["count"] - first <= 1 else None
+    else:  # e.g. "the tabletop is bare": one less per object the action takes from its place
+        action = _ACTION_RE.search(visual_prompt or "")
+        first = end["count"] - (len(_SOURCE_RE.findall(action.group(1))) if action else 0)
+    return (first, end["count"], end["noun"]) if 0 <= end["count"] - first <= MAX_COUNT_STEPS else None
 
 
 def end_problems(checks: dict, reply: dict) -> list[str]:
@@ -492,13 +614,19 @@ def clip_prompt_parts(options: dict, visual_prompt: str, sung: str = "", seeded:
         parts.append((SEEDED_SHOT, 0))
     if ends_on_image:
         parts.append((ENDING_SHOT, 0))
+    counts = row_counts(shot)
+    if counts and counts[1] - counts[0] > 1:
+        parts.append((ONE_AT_A_TIME, 0))
     if sung:
         parts.append((sung, 0))
         action = _ACTION_RE.search(shot)
         if action and re.search(r"\b(?:places?|puts?|sets?)\b", action.group(1), re.I):
+            parts.append((SONG_REACH, 0))
             parts.append((SONG_PLACING, _DROP_SONG_PLACING))
     if _STILL_CAMERA_RE.search(shot.split("START:")[0]):
         parts.append((CAMERA_LOCK, _DROP_CAMERA))
+    parts.append((SHOT_STABLE, 0))
+    parts.append((REAL_TIME, 0))
     parts.append((SHOT_CRAFT, _DROP_CRAFT))
     parts.append(("No on-screen text, captions or watermarks.", 0))
     return parts
@@ -591,6 +719,40 @@ def min_clip_seconds(clip_seconds: int) -> int:
     return min(MIN_CLIP_SECONDS, clip_seconds)
 
 
+# Clip lengths each video model accepts, (min, max) seconds: Dreamina's duration
+# picker (``get_common_config``, checked 2026-11-12: Seedance 2.0 / Fast / Mini
+# 4-15 s, Seedance 2.5 4-30 s). Unknown models: the profile's number as is.
+CLIP_RANGES = (("seedance-2.5", (4, 30)), ("seedance-2.0", (4, 15)))
+
+
+def clip_range(video_model: str) -> tuple[int, int] | None:
+    name = (video_model or "").lower()
+    return next((span for key, span in CLIP_RANGES if key in name), None)
+
+
+def clip_limit(video_model: str, clip_seconds) -> int:
+    """Longest clip to plan and request: the profile's setting, kept inside what
+    the video model accepts."""
+    try:
+        seconds = int(clip_seconds or 5)
+    except (TypeError, ValueError):
+        seconds = 5
+    span = clip_range(video_model)
+    return max(span[0], min(span[1], seconds)) if span else seconds
+
+
+# Several counting steps in one clip: fewer cuts between shots that belong
+# together (every cut is a chance for a jump, seen live in a 0-5 count cut into
+# five clips). Only for clips long enough to give each placing its own ~3 s.
+MANY_STEPS_FROM = 8  # seconds of clip
+MAX_COUNT_STEPS = 3
+
+
+def count_steps(clip_seconds: int) -> int:
+    """Most counting steps (objects placed one by one) one clip may hold."""
+    return MAX_COUNT_STEPS if clip_seconds >= MANY_STEPS_FROM else 1
+
+
 def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
     """Clamp durations, drop empty scenes, and stop before the preset limit."""
     min_s = min_clip_seconds(clip_seconds)
@@ -629,9 +791,29 @@ def normalize(data: dict, *, clip_seconds: int, limit_seconds: int) -> dict:
 _SONG_MODE = ("This project is a music video with a sung song: write every narration as sung lyrics, and make the "
               "music_prompt a song (vocals) rather than instrumental background music.")
 
+_ONE_STEP = ("ONE counting step per shot: ACTION moves exactly one counted object, so counting from 0 to 5 takes five "
+             "shots (plus an opening and a closing shot when the idea needs them); never two placings in one shot, "
+             "because the video model loses or doubles objects when one clip holds several. Without a song the placing "
+             "is done by the third second of the clip; in a song the placing falls on the lyric line of the number it "
+             "brings the count to.")
+_MANY_STEPS = ("At most {steps} counting steps per shot, done one after another: ACTION moves the counted objects ONE AT A "
+               "TIME, each with its own complete movement (take one from the place, set it down, hands back) before the "
+               "next one starts, never two at once, so counting from 0 to 5 takes two shots (e.g. 0 to 2, then 2 to 5) "
+               "plus an opening and a closing shot when the idea needs them. Every placing is a separate sentence of "
+               "ACTION saying the hand takes one object from the place and naming its spot (\"takes one apple from the "
+               "basket, places it directly to the right of the first\"). Without a song spread the placings evenly, about one every three seconds, the "
+               "first by the second second; in a song each placing falls on the lyric line of the number it brings the "
+               "count to.")
+
+
+def _counting_rule(clip_seconds: int) -> str:
+    steps = count_steps(clip_seconds)
+    return _ONE_STEP if steps == 1 else _MANY_STEPS.format(steps=steps)
+
 
 def _rules(language: str, clip_seconds: int, target: int, limit: int, aspect: str, song: bool = False) -> dict:
     return {
+        "counting": _counting_rule(clip_seconds),
         "song": _SONG_MODE if song else "",
         "language": language, "min_s": min_clip_seconds(clip_seconds), "max_s": clip_seconds,
         "words": int(clip_seconds * WORDS_PER_SECOND), "wps": WORDS_PER_SECOND,
@@ -862,34 +1044,97 @@ _COUNT_WORDS = re.compile(r"\b(?:\d+|satu|dua|tiga|empat|lima|enam|tujuh|delapan
                           r"one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
 
 
+_NUMBER_VALUES = {w: i for i, w in enumerate(
+    "nol satu dua tiga empat lima enam tujuh delapan sembilan sepuluh".split())}
+_NUMBER_VALUES.update({w: i for i, w in enumerate("zero one two three four five six seven eight nine ten".split())})
+_SUNG_NUMBER_RE = re.compile(r"\b(\d+|" + "|".join(_NUMBER_VALUES) + r")\b", re.I)
+AFTER_LAST_STEP = 2.5  # seconds a clip runs on after its last placing is sung
+MIN_LEAD = 2.0  # seconds; a shorter stretch before a counting step is filmed with it
+
+
+def step_lines(lyrics: str) -> list[tuple[float, int]]:
+    """``(second, run)`` of the sung lines that bring a count one higher ("Ambil
+    lagi, tiga apel" after "dua apel"); a "satu" starts a new run. A number that
+    repeats ("Lima apel di meja" after "lima apel") or names something else ("dua
+    murid" before any counting) is no step."""
+    out, previous, run = [], None, -1
+    for t, text in _timed_lines(lyrics):
+        found = _SUNG_NUMBER_RE.search(text or "")
+        if not found:
+            continue
+        word = found.group(1).lower()
+        value = int(word) if word.isdigit() else _NUMBER_VALUES[word]
+        if value == 1 or (previous is not None and value == previous + 1):
+            if value == 1:
+                run += 1
+            out.append((t, max(run, 0)))
+        previous = value
+    return out
+
+
+def placing_times(lyrics: str, start: float, end: float) -> list[float]:
+    """Seconds from a clip's start at which a counting step is sung in it."""
+    return [round(t - start, 3) for t, _ in step_lines(lyrics) if start - 0.25 <= t < end - 0.25]
+
+
 def lyric_parts(lyrics: str, total: float, clip_seconds: int) -> list[tuple[float, float, str]]:
     """The song cut into clip-sized parts ``(start, end, words)``. Cuts fall on
     the start of a sung line when one fits; a long instrumental stretch is split
     evenly by clip length. A tail too short to film joins the part before it.
-    A part holds at most one counting line ("dua apel"): one clip, one counting
-    step (seen live: two placings in one clip lost an apple)."""
+
+    Counting steps (see :func:`step_lines`) start their own part and a part holds
+    at most :func:`count_steps` of them, spread evenly with the smaller share first
+    (0-5 in clips of 8+ s: 0-2, then 2-5, the second drawn from the first's checked
+    end). Short clips keep one step each (seen live: two placings in a 5 s clip
+    lost an apple)."""
     timed = _timed_lines(lyrics)
     lines = [(t, text) for t, text in timed if text and t < total]
     if not lines or total <= 0:
         return []
     shortest = min_clip_seconds(clip_seconds)
+    most = count_steps(clip_seconds)
+    steps = [(t, run) for t, run in step_lines(lyrics) if t < total]
 
-    def second_count(start: float, end: float) -> float | None:
-        counted = [t for t, text in lines if start <= t < end and _COUNT_WORDS.search(text)]
-        return counted[1] if len(counted) > 1 and counted[1] - start >= shortest else None
+    def counting_part(start: float, first: float) -> tuple[float | None, float, float | None]:
+        """For a part opening with the step at ``first``: ``(end, None, None)`` when
+        it ends on a later step of its run, else ``(None, floor, ceiling)``: it
+        ends on a line after ``floor`` (its last step) and by ``ceiling`` (the next
+        step it must leave to another part)."""
+        run_id = next(r for t, r in steps if t >= first - 1e-6)
+        run = [t for t, r in steps if r == run_id and t >= first - 1e-6]
+        after = [t for t, r in steps if r != run_id and t > first]
+        per = len(run) // -(-len(run) // most)  # even shares, the smaller one first
+        while per >= 1:
+            if per < len(run):
+                if run[per] - start <= clip_seconds:
+                    return run[per], start, None
+            elif min(total, start + clip_seconds) - run[-1] >= AFTER_LAST_STEP:
+                return None, run[-1], after[0] if after else None
+            per -= 1
+        return None, first, run[1] if len(run) > 1 else (after[0] if after else None)
 
     edges = [0.0]
     while True:
         start = edges[-1]
-        if total - start <= clip_seconds:
-            split = second_count(start, total)
-            if split is None or total - split < shortest:
-                break
-            edges.append(split)
+        ahead = [t for t, _ in steps if t >= start - 1e-6]
+        floor, ceiling = start, None
+        if ahead and ahead[0] - start < MIN_LEAD:  # the part opens with a counting step
+            end, floor, ceiling = counting_part(start, ahead[0])
+            if end is not None:
+                edges.append(end)
+                continue
+        elif ahead and ahead[0] - start <= clip_seconds:  # the steps start their own part
+            edges.append(ahead[0])
             continue
-        fits = [t for t, _ in lines if start < t <= start + clip_seconds]
-        end = fits[-1] if fits else start + clip_seconds
-        edges.append(second_count(start, end) or end)
+        elif ahead:
+            ceiling = ahead[0]
+        if ceiling is not None and ceiling - start <= clip_seconds:
+            edges.append(ceiling)
+            continue
+        if total - start <= clip_seconds:
+            break
+        fits = [t for t, _ in lines if floor < t <= start + clip_seconds]
+        edges.append(fits[-1] if fits else start + clip_seconds)
     if len(edges) > 1 and total - edges[-1] < shortest:
         edges.pop()
     edges.append(float(total))

@@ -134,7 +134,17 @@ def build(after_png: bytes, before_png: bytes | None, boxes: list[Box], containe
     # the newest object is where the shot changed most; a row grows on that side
     scores = [_changed(after, before, b) for b in boxes]
     newest = max(range(len(boxes)), key=lambda i: scores[i]) if max(scores) > 0 else len(boxes) - 1
-    step_dir = -1 if len(boxes) > 1 and newest == 0 else 1
+    placed = [i for i, s in enumerate(scores) if s > 0 and s >= 0.5 * max(scores)]
+    if len(placed) <= 1:
+        step_dir = -1 if len(boxes) > 1 and newest == 0 else 1
+    elif len(placed) < len(boxes):  # a shot that placed several next to older ones
+        old = [i for i in range(len(boxes)) if i not in placed]
+        step_dir = -1 if sum(placed) / len(placed) < sum(old) / len(old) else 1
+    else:  # the whole row is new: it grows toward where the objects come from, else right
+        centre = (boxes[0][0] + boxes[-1][2]) / 2
+        step_dir = -1 if container and (container[0] + container[2]) / 2 < centre else 1
+    if len(placed) > 1:
+        newest = max(placed) if step_dir > 0 else min(placed)
     edge = boxes[newest]
     if len(boxes) > 1:
         step = median(abs(b[0] - a[0]) for a, b in zip(boxes, boxes[1:]))

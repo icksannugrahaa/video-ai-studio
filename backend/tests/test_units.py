@@ -443,7 +443,8 @@ def test_storyboard_takes_its_timing_and_words_from_the_song():
 def test_counted_objects_are_placed_once_and_have_room():
     from app.pipeline import planner
     assert "never repeated" in planner.SHOT_CRAFT and "none is stacked" in planner.SHOT_CRAFT
-    assert "by the third second" in planner._SYSTEM and "empty space" in planner._SYSTEM
+    assert "by the third second" in planner._ONE_STEP and "empty space" in planner._SYSTEM
+    assert "{counting}" in planner._SYSTEM
     assert "including the closing shot" in planner._SYSTEM
 
 
@@ -663,14 +664,64 @@ def test_room_for_objects_not_there_yet_is_not_sent_to_the_video_model():
         assert planner.drop_future_objects(kept) == kept
 
 
-def test_song_part_never_holds_two_counting_steps():
-    lyrics = ("[0:00] Bu Guru, dua murid, apel di keranjang\n[0:03] Nol apel di meja\n[0:06] Ambil satu, satu apel\n"
-              "[0:10] Ambil lagi, dua apel\n[0:14] Ambil lagi, tiga apel\n[0:18] Ambil lagi, empat apel\n"
-              "[0:22] Ambil lagi, lima apel\n[0:25] Lima apel di meja")
-    parts = planner.lyric_parts(lyrics, 30, 10)
-    assert [p[2] for p in parts[1:5]] == ["Ambil satu, satu apel", "Ambil lagi, dua apel", "Ambil lagi, tiga apel",
-                                          "Ambil lagi, empat apel"]
-    assert all(b - a >= planner.min_clip_seconds(10) for a, b, _ in parts)
+_COUNT_SONG = ("[0:00] Bu Guru, dua murid, apel di keranjang\n[0:03] Nol apel di meja\n[0:06] Ambil satu, satu apel\n"
+               "[0:10] Ambil lagi, dua apel\n[0:14] Ambil lagi, tiga apel\n[0:18] Ambil lagi, empat apel\n"
+               "[0:22] Ambil lagi, lima apel\n[0:25] Lima apel di meja")
+
+
+def test_counting_steps_are_the_lines_that_raise_the_count():
+    # "dua murid" before any counting and the repeated "Lima apel di meja" are no steps
+    assert [t for t, _ in planner.step_lines(_COUNT_SONG)] == [6.0, 10.0, 14.0, 18.0, 22.0]
+    again = planner.step_lines("[0:01] satu\n[0:04] dua\n[0:08] lagi dari satu\n[0:11] dua")
+    assert [run for _, run in again] == [0, 0, 1, 1]
+    assert planner.placing_times(_COUNT_SONG, 14.0, 25.0) == [0.0, 4.0, 8.0]
+
+
+def test_long_clips_hold_a_count_in_two_shots_and_short_clips_keep_one_step_each():
+    parts = planner.lyric_parts(_COUNT_SONG, 30, 15)  # Dreamina Seedance 2.0: up to 15 s
+    assert [(a, b) for a, b, _ in parts] == [(0.0, 6.0), (6.0, 14.0), (14.0, 25.0), (25.0, 30.0)]
+    assert parts[1][2] == "Ambil satu, satu apel Ambil lagi, dua apel"  # 0-2 first, the rig draws 2-5
+    ten = planner.lyric_parts(_COUNT_SONG, 30, 10)
+    assert [(a, b) for a, b, _ in ten] == [(0.0, 6.0), (6.0, 14.0), (14.0, 22.0), (22.0, 30.0)]
+    five = planner.lyric_parts(_COUNT_SONG, 30, 5)
+    assert [p[2] for p in five[2:7]] == ["Ambil satu, satu apel", "Ambil lagi, dua apel", "Ambil lagi, tiga apel",
+                                         "Ambil lagi, empat apel", "Ambil lagi, lima apel"]
+    for split in (parts, ten, five):
+        assert split[-1][1] == 30 and all(a[1] == b[0] for a, b in zip(split, split[1:]))
+
+
+def test_clip_limit_follows_the_video_model():
+    assert planner.clip_limit("dreamina/seedance-2.0-mini", 30) == 15
+    assert planner.clip_limit("dreamina/seedance-2.5", 30) == 30
+    assert planner.clip_limit("dreamina/seedance-2.0-fast", 2) == 4
+    assert planner.clip_limit("other/video", 30) == 30 and planner.clip_limit("x", None) == 5
+    assert planner.count_steps(15) == planner.MAX_COUNT_STEPS and planner.count_steps(5) == 1
+    assert "ONE AT A TIME" in planner._rules("id-ID", 15, 30, 60, "16:9")["counting"]
+    assert "ONE counting step" in planner._rules("id-ID", 5, 30, 60, "16:9")["counting"]
+
+
+def test_frames_between_placings_are_checked_with_room_for_a_late_hand():
+    shot = ("Table. START: exactly two large red apples in a row on the table; a deep basket on a stool. ACTION: takes "
+            "one apple from the basket, places it right of the second. Then another. Then another. END: exactly five "
+            "large red apples in a row on the table; a deep basket on a stool.")
+    assert planner.row_counts(shot) == (2, 5, "apples")
+    assert planner.step_checks(shot, [0.0, 4.0, 8.0], 11.0) == [(2.0, 3, "apples"), (6.0, 4, "apples")]
+    assert planner.step_checks(shot, [0.0, 4.0], 11.0) == []  # the song does not give one line per step
+    assert planner.step_problems(2.0, 3, "apples", {"count": 2}) == []  # the hand is a beat late
+    assert planner.step_problems(2.0, 3, "apples", {"count": 4}) == ["detik 2.0: apples 4, seharusnya 3"]
+    assert planner.ONE_AT_A_TIME in planner.clip_prompt({"bible_style": "3D"}, shot)
+
+
+def test_mid_clip_findings_are_noted_apart_from_the_end():
+    note = planner.findings_note(["basket tidak terlihat"], ["detik 2.0: apples 4, seharusnya 3"])
+    assert note == "Frame terakhir: basket tidak terlihat · Tengah clip: detik 2.0: apples 4, seharusnya 3"
+    assert planner.count_right(note)  # the end is what the rig reuses, and it counted right
+    assert not planner.count_right("Frame terakhir: apples 4, seharusnya 5 · Tengah clip: detik 2.0: apples 4, "
+                                   "seharusnya 3")
+    assert "4 apples instead of 3 at second 2" in planner.correction_note(note)
+    assert planner.findings_note([], []) is None
+    assert planner.correction_note("Frame terakhir: apples 4, seharusnya 5").startswith(
+        "A previous take of this shot went wrong (4 apples instead of 5)")
 
 
 def test_container_contents_and_verbs_are_not_read_as_what_lies_in_view():
@@ -784,7 +835,11 @@ def test_count_right_ignores_findings_that_are_not_about_the_count():
     assert planner.count_right(None) and planner.count_right("")
     assert planner.count_right("Frame terakhir: cot tidak terlihat")
     assert not planner.count_right("Frame terakhir: apples 5, seharusnya 4, cot tidak terlihat")
-    assert not planner.count_right("Frame terakhir: apples in basket 2, seharusnya 3")
+    # what a container holds is only noted (heaps are miscounted): the row is what the rig reuses
+    assert planner.count_right("Frame terakhir: apples in basket 2, seharusnya 3")
+    assert not planner.count_right("Frame terakhir: apples in basket 2, seharusnya 3, apples 3, seharusnya 2")
+    assert planner.blocking(["apples in basket 4, seharusnya 5", "basket tidak terlihat"]) == ["basket tidak terlihat"]
+    assert planner.row_wrong(["apples 3, seharusnya 2"]) and not planner.row_wrong(["detik 2.0: apples 3, seharusnya 2"])
     assert not planner.count_right("Frame terakhir belum dicek: model chat tidak menjawab.")
 
 
@@ -805,3 +860,64 @@ def test_flex_plan_keeps_clip_speed_and_moves_the_cuts_instead():
         assert abs(cut - line) < FLEX_DRIFT + 0.15
     assert plan[1]["active"] == round(3.56 + 0.1, 3)     # the held end only covers the outgoing fade
     assert flex_plan([4.0, 0.5], [0.0, 0.0], [(4.0, 4.0), (4.0, 4.0)]) is None  # nothing left for the last
+
+
+def test_a_reference_shot_that_placed_its_whole_row_grows_toward_the_basket():
+    from app.pipeline import rig
+    a, b = (60, 100, 100, 140), (120, 100, 160, 140)
+    basket = (300, 60, 380, 160)
+    made = rig.build(_scene_png([a, b]), _scene_png([]), [a, b], basket, total=4)
+    assert made.slots and made.slots[0][0] > b[0]  # right, toward the basket
+    c, d = (200, 100, 240, 140), (260, 100, 300, 140)
+    left = rig.build(_scene_png([c, d]), _scene_png([]), [c, d], (0, 60, 40, 160), total=3)
+    assert left.slots[0][2] < c[0]  # left, toward the basket there
+    with pytest.raises(rig.RigError):  # never across the row into the other side
+        rig.build(_scene_png([c, d]), _scene_png([]), [c, d], (0, 60, 40, 160), total=6)
+
+
+def test_a_shot_starting_on_a_bare_table_counts_its_placings():
+    shot = ("Table. START: the tabletop is bare; a deep basket on a stool. ACTION: Rani takes one apple from the "
+            "basket, places it at the left end. Then she takes one apple from the basket, places it right of the "
+            "first. END: exactly two large red apples in a row on the table; a deep basket on a stool.")
+    assert planner.row_counts(shot) == (0, 2, "apples")
+    assert planner.lyric_parts("[0:00] satu apel\n[0:03] dua apel\n[0:06] tiga apel\n[0:09] ", 10, 12) == [
+        (0.0, 10.0, "satu apel dua apel tiga apel")]
+    lead = planner.lyric_parts("[0:01] satu apel\n[0:04] dua apel\n[0:07] tiga apel", 10, 12)
+    assert [(a, b) for a, b, _ in lead] == [(0.0, 10.0)]  # 1 s before the first step is no shot of its own
+
+
+def test_the_basket_count_goes_down_as_the_row_grows():
+    shot = ("Table. START: exactly two large red apples in a row on the table; exactly three large red apples in a low "
+            "open woven basket on a low stool touching the right end of the table. ACTION: takes one apple from the "
+            "basket, places it right of the second. END: exactly three large red apples in a row on the table; exactly "
+            "two large red apples in a low open woven basket on a low stool touching the right end of the table.")
+    end = planner.end_checks(shot)
+    assert end["count"] == 3 and end["held"] == {"basket": 2}
+    assert planner.row_counts(shot) == (2, 3, "apples")
+    assert "NEVER how many" not in planner._SYSTEM and "goes down by one" in planner._SYSTEM
+
+
+def test_trimming_for_a_prompt_limit_never_drops_the_shape_and_colour_rule():
+    shot = ("Table. START: exactly two large red apples in a row on the table. ACTION: takes one apple from the basket, "
+            "places it right of the second. END: exactly three large red apples in a row on the table.")
+    parts = planner.clip_prompt_parts({"bible_style": "3D", "bible_character": "x" * 2400}, shot,
+                                      sung='A song is sung during this shot (0s "tiga apel")', seeded=True)
+    text = planner.fit_prompt(parts, 4000)
+    assert len(text) <= 4000 and planner.SHOT_STABLE in text and planner.SONG_REACH in text
+    assert planner.SHOT_CRAFT not in text
+
+
+def test_container_counts_written_as_full_sentences_are_read_as_the_basket():
+    # wording from a live plan (2026-11-12)
+    full = ("START: x. ACTION: y. END: The tabletop is bare; exactly five large identical red apples lie separated in "
+            "one layer inside a low open woven basket on a low stool touching the table’s right end.")
+    assert planner.end_checks(full)["count"] is None and planner.end_checks(full)["held"] == {"basket": 5}
+    some = ("START: x. ACTION: takes one apple from the basket. END: Exactly two large identical red apples form a "
+            "separated tabletop row; exactly three remain fully visible in one layer inside a low open woven basket "
+            "on a low stool touching the table’s right end.")
+    assert planner.end_checks(some)["count"] == 2 and planner.end_checks(some)["held"] == {"basket": 3}
+    empty = ("START: x. ACTION: y. END: Exactly five large identical red apples form a separated tabletop row; a low "
+             "open woven basket on a low stool touching the table’s right end is empty, holding zero apples.")
+    assert planner.end_checks(empty)["held"] == {"basket": 0}
+    hands = "START: x. ACTION: y. END: Bu Rani stands behind the table, empty hands lowered; exactly two apples in a row."
+    assert "held" not in planner.end_checks(hands)

@@ -487,14 +487,15 @@ def test_end_state_still_wrong_after_the_retake_is_shown_on_the_scene(app, clien
 @needs_ffmpeg
 def test_unreadable_answer_bills_no_retake_but_flags_the_scene(app, client, fake_client, monkeypatch):
     _basket_board(fake_client, monkeypatch)
-    _answers(fake_client, monkeypatch, *["maaf, saya tidak bisa melihat gambar"] * 3)
+    _answers(fake_client, monkeypatch, *["maaf, saya tidak bisa melihat gambar"] * 6)
     pid = _setup(client, continuity=True)["id"]
     client.post(f"/api/projects/{pid}/plan")
     _run_jobs(app)
     fake_client.calls = []
     scene = _rendered(client, app, pid)["scenes"][0]
     assert len(_videos(fake_client)) == 1
-    assert len([c for c in fake_client.calls if c[0] == "look"]) == 3  # asked again before giving up
+    # asked again before giving up, then once more for the row count alone
+    assert len([c for c in fake_client.calls if c[0] == "look"]) == 6
     assert scene["clip_status"] == "done" and scene["clip_error"] == app_engine.UNCHECKED_NOTE
 
 
@@ -1034,7 +1035,9 @@ def test_counting_shots_after_a_checked_one_start_and_end_on_frames_drawn_with_t
     assert [c[4] for c in _videos(fake_client)] == [False, True, True]
     assert fake_client.last_frames[0] is None
     assert all(f and f[:8] == b"\x89PNG\r\n\x1a\n" for f in fake_client.last_frames[1:])
-    assert [c[0] for c in fake_client.calls].count("boxes") == 1  # one rig for the whole sequence
+    # the newest checked clip is asked first (its boxes do not match: one box for two apples), then the
+    # first clip's rig, already made, draws the rest
+    assert [c[0] for c in fake_client.calls].count("boxes") == 2
     assert not [c for c in fake_client.calls if c[0] == "image"]  # no image model needed
     keys = settings.projects_dir / str(pid) / "keyframes"
     assert {p.name for p in keys.glob("scene_*_rig_*.png")} == {
@@ -1112,3 +1115,155 @@ def test_still_tail_measures_the_held_end_frame_by_frame(tmp_path):
     from app.engine import MIN_CUT_TAIL, trimmed_end
     assert trimmed_end(4.1, 4.1 - 0.35, 4.2, min_tail=MIN_CUT_TAIL) == pytest.approx(3.75)
     assert trimmed_end(4.1, 4.1 - 0.05, 4.2, min_tail=MIN_CUT_TAIL) is None  # a frame or two: keep it
+
+
+_STEPS_SHOT = ("Table; the camera stays still. START: the tabletop is bare; a deep basket on a stool. ACTION: Rani takes "
+               "one apple from the basket, places it at the left end. Then she takes one apple from the basket, places "
+               "it right of the first. Then she takes one apple from the basket, places it right of the second. END: "
+               "exactly three large red apples in a row on the table; a deep basket on a stool.")
+
+
+def _song_steps(app, client, fake_client, monkeypatch):
+    board = _bible_board(False)
+    board["scenes"][0].update(visual_prompt=_STEPS_SHOT, duration=10)
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    login(client)
+    profile = client.post("/api/profiles", json={
+        "name": "router", "base_url": "https://ai.example.com", "api_key": "sk-test", "chat_model": "kimi",
+        "video_model": "dreamina/seedance-2.0-mini", "tts_model": "edge-tts", "clip_seconds": 30}).json()
+    pid = client.post("/api/projects", json={
+        "prompt": "Berhitung apel", "preset": "tiktok", "target_seconds": 10, "profile_id": profile["id"],
+        "options": {"continuity": True, "music_style": "song", "music_mode": "external",
+                    "lyrics": "[0:00] satu apel\n[0:03] dua apel\n[0:06] tiga apel\n[0:09] "}}).json()["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    return pid
+
+
+@needs_ffmpeg
+def test_two_objects_placed_at_once_mid_clip_bill_one_retake(app, client, fake_client, monkeypatch):
+    pid = _song_steps(app, client, fake_client, monkeypatch)
+    # end, then halfway between the placings (1.5 s: one apple, 4.5 s: two); the retake gets it right
+    _answers(fake_client, monkeypatch, '{"count":3,"visible":{"basket":true}}', '{"count":2}', '{"count":2}',
+             '{"count":3,"visible":{"basket":true}}', '{"count":1}', '{"count":2}')
+    scene = _rendered(client, app, pid)["scenes"][0]
+    videos = _videos(fake_client)
+    assert len(videos) == 2 and videos[0][2] == 11  # the song part, within Dreamina's 4-15 s
+    assert planner.ONE_AT_A_TIME in videos[0][1]
+    assert scene["clip_file"].endswith("_retake.mp4") and not scene["clip_error"]
+
+
+@needs_ffmpeg
+def test_a_count_still_wrong_mid_clip_is_noted_apart_from_the_end(app, client, fake_client, monkeypatch):
+    pid = _song_steps(app, client, fake_client, monkeypatch)
+    ok_end = '{"count":3,"visible":{"basket":true}}'
+    _answers(fake_client, monkeypatch, ok_end, '{"count":2}', '{"count":2}', ok_end, '{"count":3}', '{"count":2}')
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2
+    assert scene["clip_file"] == "clips/scene_0_v1.mp4"
+    assert scene["clip_error"] == "Tengah clip: detik 1.5: apples 2, seharusnya 1"
+    assert planner.count_right(scene["clip_error"])  # its end can still teach the rig
+
+
+@needs_ffmpeg
+def test_a_shot_placing_several_starts_on_the_previous_clip_and_gets_no_drawn_end(
+        app, client, fake_client, monkeypatch, settings):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    board = _bible_board(False, True)
+    board["scenes"][0]["visual_prompt"] = _RIG_SHOTS[0]
+    board["scenes"][1]["visual_prompt"] = (
+        "Table; the camera stays still. START: exactly one large red apple on the table; a deep basket on a stool. "
+        "ACTION: Rani takes one apple from the basket, places it right of the first. Then she takes one apple from "
+        "the basket, places it right of the second. END: exactly three large red apples in a row on the table; a "
+        "deep basket on a stool.")
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    monkeypatch.setattr(fake_client, "boxes_reply", '{"objects": [[500, 100, 560, 250]], "surface": null}')
+    _answers(fake_client, monkeypatch, '{"count":1}', '{"count":3}', '{"count":3}')  # end 1, rig row, end 2
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls, fake_client.last_frames = [], []
+    _rendered(client, app, pid)
+    assert fake_client.last_frames == [None, None]  # no drawn end to drag the row into
+    keys = settings.projects_dir / str(pid) / "keyframes"
+    assert (keys / "scene_1_v1_rig_start.png").exists() and not (keys / "scene_1_v1_rig_end.png").exists()
+    assert planner.ONE_AT_A_TIME in _videos(fake_client)[1][1]
+
+
+@needs_ffmpeg
+def test_a_row_still_wrong_after_three_takes_stops_the_render_before_the_next_shot(app, client, fake_client, monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    board = _bible_board(False, True)
+    board["scenes"][0]["visual_prompt"] = _RIG_SHOTS[1]
+    board["scenes"][1]["visual_prompt"] = _RIG_SHOTS[2]
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    _answers(fake_client, monkeypatch, '{"count":3}', '{"count":3}', '{"count":3}')
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "failed" and "jumlah masih salah setelah 3 take" in detail["jobs"][0]["message"]
+    assert len(_videos(fake_client)) == 3  # the next shot is never billed
+    first, second = detail["scenes"]
+    assert first["clip_status"] == "done" and "apples 3, seharusnya 2" in first["clip_error"]
+    assert second["clip_status"] != "done"
+    assert len(list((app.state.services.settings.projects_dir / str(pid) / "clips").glob("scene_0_*"))) == 1
+
+
+@needs_ffmpeg
+def test_what_the_basket_holds_is_noted_but_bills_no_retake(app, client, fake_client, monkeypatch):
+    board = _bible_board(False)
+    board["scenes"][0]["visual_prompt"] = (
+        "Table. START: exactly one large red apple on the table; exactly four large red apples in a low open woven "
+        "basket beside the table. ACTION: takes one apple from the basket, places it right of the first. END: exactly "
+        "two large red apples in a row on the table; exactly three large red apples in a low open woven basket "
+        "beside the table.")
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    _answers(fake_client, monkeypatch, '{"count":2,"visible":{"basket":true},"held":{"basket":4}}')
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 1
+    assert scene["clip_error"] == "Frame terakhir: apples in basket 4, seharusnya 3"
+
+
+@needs_ffmpeg
+def test_an_unanswered_end_check_falls_back_to_the_row_count(app, client, fake_client, monkeypatch):
+    _basket_board(fake_client, monkeypatch)
+    timeout = ProviderError("timeout", status=524)
+    # full question unanswered three times; the row alone is: three where two belong -> one retake
+    _answers(fake_client, monkeypatch, timeout, timeout, timeout, '{"count":3}',
+             '{"count":2,"visible":{"basket":true}}')
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    scene = _rendered(client, app, pid)["scenes"][0]
+    assert len(_videos(fake_client)) == 2
+    assert scene["clip_file"].endswith("_retake.mp4") and not scene["clip_error"]
+
+
+@needs_ffmpeg
+def test_a_counting_clip_nobody_could_check_stops_before_the_shot_it_seeds(app, client, fake_client, monkeypatch):
+    monkeypatch.setattr(media, "seam_gap", lambda prev, nxt: 0.0)
+    board = _bible_board(False, True)
+    board["scenes"][0]["visual_prompt"] = _RIG_SHOTS[1]
+    board["scenes"][1]["visual_prompt"] = _RIG_SHOTS[2]
+    monkeypatch.setattr(fake_client, "storyboard", board)
+    _answers(fake_client, monkeypatch, *[ProviderError("timeout", status=524)] * 6)
+    pid = _setup(client, continuity=True)["id"]
+    client.post(f"/api/projects/{pid}/plan")
+    _run_jobs(app)
+    fake_client.calls = []
+    client.post(f"/api/projects/{pid}/render", json={"confirm": True})
+    _run_jobs(app)
+    detail = client.get(f"/api/projects/{pid}").json()
+    assert detail["jobs"][0]["status"] == "failed" and "belum bisa dicek" in detail["jobs"][0]["message"]
+    assert len(_videos(fake_client)) == 1  # nothing billed on a count nobody saw
+    assert detail["scenes"][0]["clip_error"] == app_engine.UNCHECKED_NOTE
