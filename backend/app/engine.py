@@ -42,6 +42,7 @@ SEAM_DISSOLVE = 0.2  # seconds, continuing shots
 GAIN_LIMIT = 0.15  # most a chain's colour may be corrected
 MAX_SLOWDOWN = 1.15  # more than this is noticeable
 MIN_STILL_TAIL = 0.5  # seconds; a shorter hold reads as a natural beat
+MIN_CUT_TAIL = 0.12  # seconds; before a continuing cut even a short hold reads as a stop
 
 
 def clip_chains(scenes: list[dict], *, continuity: bool, bible: bool) -> list[list[dict]]:
@@ -92,11 +93,12 @@ def scene_transitions(scenes: list[dict], lengths: list[float], options: dict,
     return fades
 
 
-def trimmed_end(clip_seconds: float, active: float, target: float) -> float | None:
+def trimmed_end(clip_seconds: float, active: float, target: float,
+                min_tail: float = MIN_STILL_TAIL) -> float | None:
     """Where to end a clip that holds its pose after ``active`` seconds so the rest,
     slowed down at most ``MAX_SLOWDOWN``, still fills ``target``. ``None`` = keep it."""
     end = max(active, target / MAX_SLOWDOWN)
-    return round(end, 3) if end < target and clip_seconds - end >= MIN_STILL_TAIL else None
+    return round(end, 3) if end < target and clip_seconds - end >= min_tail else None
 
 
 def chain_gains(seams: list[tuple[float, float, float] | None]) -> list[tuple[float, float, float]]:
@@ -961,6 +963,12 @@ class Engine:
                 try:
                     src = ws.path(scene["clip_file"])
                     active = trimmed_end(media.duration(src), media.active_seconds(src), retime or seconds)
+                    if active is None and scenes[n].get("continues"):
+                        # the next shot starts from this pose and moves at once: a held
+                        # end reads as a stop before every cut, however short
+                        clip = media.duration(src)
+                        active = trimmed_end(clip, clip - media.still_tail(src), retime or seconds,
+                                             min_tail=MIN_CUT_TAIL)
                 except media.MediaError:
                     pass
             retime = (retime or seconds) if active else retime

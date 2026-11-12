@@ -273,6 +273,34 @@ def active_seconds(path: Path, *, window: float = 0.25) -> float:
     return (end + 1) / rate
 
 
+STILL_STEP = 0.3  # mean grey change between two real frames (32x18, 0-255); held poses measure 0.1-0.2
+
+
+def still_tail(path: Path) -> float:
+    """Seconds the clip holds still at its end, frame by frame. Clips given a last
+    frame slow to a full stop to land on it (seen live: 8-10 frames, ~0.35 s),
+    and the next clip starts moving at once: a stop-and-jerk at every cut. The
+    held frames all show the pose the next clip starts from, so they can go."""
+    rate = frame_rate(path)
+    w, h = _GAP_SIZE
+    args = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(path),
+            "-vf", f"scale={w}:{h}:flags=area,format=gray", "-fps_mode", "passthrough", "-f", "rawvideo", "-"]
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError("ffmpeg timeout") from exc
+    if proc.returncode != 0 or rate <= 0:
+        raise MediaError("gagal membaca frame clip")
+    size = w * h
+    frames = [proc.stdout[i:i + size] for i in range(0, len(proc.stdout) - size + 1, size)]
+    held = 0
+    for a, b in zip(reversed(frames[:-1]), reversed(frames[1:])):
+        if sum(abs(x - y) for x, y in zip(a, b)) / size >= STILL_STEP:
+            break
+        held += 1
+    return held / rate
+
+
 def seam_colour_mean(path: Path, *, last: bool = False) -> tuple[float, float, float]:
     """Mean red, green and blue of a clip's first or last frame."""
     w, h = _SEAM_SIZE

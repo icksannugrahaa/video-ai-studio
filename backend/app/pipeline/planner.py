@@ -153,10 +153,12 @@ CAMERA_LOCK = ("The camera is fixed on a tripod: no pan, tilt, zoom, push-in, pu
                "table edges keep the same position in the frame from the first to the last frame.")
 _STILL_CAMERA_RE = re.compile(r"\b(locked[- ]off|camera (?:stays )?still|fixed (?:camera|[\w-]* ?shot)|static camera)\b", re.I)
 ENDING_SHOT = ("The last frame is supplied as well: the action ends exactly on it, with every object where it "
-               "shows it; move naturally from the first image to the last one.")
+               "shows it; move naturally from the first image to the last one, and keep everyone gently moving "
+               "until the very last frame instead of stopping early to wait for it.")
 SEEDED_SHOT = ("Start exactly on the supplied image and continue it: same framing, camera side and characters' "
                "positions. Every object in the image is there from the first frame and stays in place; "
-               "nothing disappears or resets.")
+               "nothing disappears or resets. Movement picks up gradually from the image, as if it was already "
+               "under way: no blink, head turn or change of expression in the first half second.")
 
 
 _SHOT_RE = re.compile(r"\bSTART:\s*.*?\s*(?=\bACTION:)", re.S)

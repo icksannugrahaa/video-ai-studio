@@ -1097,3 +1097,17 @@ def test_seam_gap_reads_two_renders_of_one_detailed_picture_as_matching(tmp_path
                         f"nullsrc=s=1280x720:d=0.5,geq=lum='128+120*sin((X+{shift})*1.3)*sin(Y*1.1)':cb=128:cr=128",
                         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)], check=True)
     assert media.seam_gap(still, other) < media.SEAM_BREAK
+
+
+@needs_ffmpeg
+def test_still_tail_measures_the_held_end_frame_by_frame(tmp_path):
+    import subprocess
+    clip = tmp_path / "held.mp4"
+    # moves for 1 s, then holds for 9 frames (0.375 s at 24 fps)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=128x72:r=24:d=1.375,geq=lum='128+100*sin((X+min(N,24)*6)/9)':cb=128:cr=128",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    assert media.still_tail(clip) == pytest.approx(9 / 24, abs=1.5 / 24)
+    from app.engine import MIN_CUT_TAIL, trimmed_end
+    assert trimmed_end(4.1, 4.1 - 0.35, 4.2, min_tail=MIN_CUT_TAIL) == pytest.approx(3.75)
+    assert trimmed_end(4.1, 4.1 - 0.05, 4.2, min_tail=MIN_CUT_TAIL) is None  # a frame or two: keep it
