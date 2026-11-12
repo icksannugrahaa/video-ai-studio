@@ -44,7 +44,7 @@ def probe(path: Path) -> dict:
     if not ffprobe:
         raise MediaError("ffprobe tidak ditemukan")
     proc = subprocess.run(
-        [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type,r_frame_rate",
+        [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type,r_frame_rate,nb_frames,duration",
          "-of", "json", str(path)],
         capture_output=True, timeout=60,
     )
@@ -66,6 +66,26 @@ def video_fps(path: Path) -> float:
                 return float(num) / float(den or 1)
             except (ValueError, ZeroDivisionError):
                 return 0.0
+    return 0.0
+
+
+def frame_rate(path: Path) -> float:
+    """Frames per second the file really holds (frames / duration), snapped to a
+    standard rate; 0 when unknown. Models deliver 24 frames a second stamped on a
+    60 fps clock (50 and 33 ms apart in turn), so ``r_frame_rate`` says 60."""
+    info = probe(path)
+    for stream in info.get("streams") or []:
+        if stream.get("codec_type") != "video":
+            continue
+        try:
+            frames = int(stream.get("nb_frames") or 0)
+            seconds = float(stream.get("duration") or (info.get("format") or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if frames < 2 or seconds <= 0:
+            return 0.0
+        rate = frames / seconds
+        return next((r for r in (24.0, 25.0, 30.0, 50.0, 60.0) if abs(rate - r) <= r * 0.03), rate)
     return 0.0
 
 
@@ -189,19 +209,43 @@ def seam_frames(prev: Path, nxt: Path, *, window: float = 0.6, fps: float = 24.0
     return k + 1
 
 
-SEAM_BREAK = 15.0  # worst block's mean grey difference (0-255); good seeded seams measure 10-11, broken ones 20+
+SEAM_BREAK = 15.0  # worst block's mean grey difference (0-255); matching seeded seams measure 6-13, broken ones 20+
+
+
+_GAP_SIZE = (32, 18)
+
+
+def _grey_frame(path: Path, *, last: bool) -> bytes | None:
+    """One area-averaged grey frame. Area averaging matters: the default scaler
+    aliases fine detail (leaves, tiles) at this size, and two renders of the same
+    picture then measured as far apart as a missing apple (seen live: 15-20 on
+    seams that matched)."""
+    w, h = _GAP_SIZE
+    args = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", *(["-sseof", "-0.5"] if last else []),
+            "-i", str(path), "-vf", f"scale={w}:{h}:flags=area,format=gray",
+            *([] if last else ["-frames:v", "1"]), "-f", "rawvideo", "-"]
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError("ffmpeg timeout") from exc
+    if proc.returncode != 0:
+        raise MediaError("gagal membaca frame clip")
+    size = w * h
+    if len(proc.stdout) < size:
+        return None
+    return proc.stdout[-size:] if last else proc.stdout[:size]
 
 
 def seam_gap(prev: Path, nxt: Path) -> float:
     """How far a seeded clip's first frame is from the end of the previous clip.
     Compared per block: a small object changing barely moves the whole-frame mean."""
-    frames, first = _grey_frames(prev), _grey_frames(nxt, first_only=True)
-    if not frames or not first:
+    end, first = _grey_frame(prev, last=True), _grey_frame(nxt, last=False)
+    if not end or not first:
         return 0.0
-    w, h = _SEAM_SIZE
+    w, h = _GAP_SIZE
     cols, rows = 8, 4
     totals = [0] * (cols * rows)
-    for i, (x, y) in enumerate(zip(frames[-1], first[0])):
+    for i, (x, y) in enumerate(zip(end, first)):
         totals[(i % w) * cols // w + (i // w) * rows // h * cols] += abs(x - y)
     return max(totals) / (w * h / (cols * rows))
 
@@ -274,6 +318,12 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     src_seconds = duration(src)
     stretch = ""
     cut = ""
+    # Even frame spacing first: stretched with the model's uneven 50/33 ms stamps,
+    # the fps filter doubles one frame and drops the next for seconds at a time
+    # (seen live: a 3 % slowdown played at 12 fps). Evenly spaced, a slowdown just
+    # repeats a frame now and then.
+    rate = frame_rate(src)
+    even = f"settb=1/{round(rate) * 1000},setpts=N/({rate:g}*TB)," if rate else ""  # a clock that holds 1/rate exactly
     if active:
         cut = f"trim=end={active:.3f},setpts=PTS-STARTPTS,"
         src_seconds = active
@@ -297,7 +347,7 @@ def normalize_clip(src: Path, dst: Path, *, width: int, height: int, fps: float,
     pad = missing - head + 0.1
     tpad = f"tpad=start_mode=clone:start_duration={head:.3f}:" if head > 0 else "tpad="
     tint = f"colorchannelmixer=rr={gain[0]:.4f}:gg={gain[1]:.4f}:bb={gain[2]:.4f}," if gain else ""
-    vf = (f"{tint}{cut}{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+    vf = (f"{even}{tint}{cut}{stretch}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
           f"setsar=1,fps={fps:g},{bounce}{tpad}stop_mode=clone:stop_duration={pad:.3f}")
     args: list = ["-i", src]
     if keep_audio and has_audio(src):

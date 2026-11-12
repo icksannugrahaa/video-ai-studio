@@ -1061,3 +1061,39 @@ def test_rig_waits_for_a_clip_whose_boxes_match_its_count(app, client, fake_clie
     _rendered(client, app, project["id"])
     assert fake_client.last_frames[:2] == [None, None]  # second shot: plain seeded clip, as before
     assert fake_client.last_frames[2][:8] == b"\x89PNG\r\n\x1a\n"
+
+
+@needs_ffmpeg
+def test_a_model_clip_with_uneven_frame_stamps_is_slowed_without_stutter(tmp_path):
+    import subprocess
+    import numpy as np
+    src = tmp_path / "model.mp4"
+    # 24 frames a second stamped on a 60 fps clock, 50 and 33 ms apart in turn (as models deliver)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=128x72:rate=24:duration=4",
+                    "-vf", "setpts=(floor(N/2)*5/60+mod(N\\,2)*3/60)/TB", "-fps_mode", "passthrough",
+                    "-video_track_timescale", "60", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0",
+                    "-pix_fmt", "yuv420p",
+                    str(src)], check=True)
+    assert media.frame_rate(src) == 24.0
+    out = media.normalize_clip(src, tmp_path / "o.mp4", width=128, height=72, fps=24, seconds=4.2,
+                               keep_audio=False, preset="ultrafast", retime=4.2)
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out), "-vf", "format=gray", "-f", "rawvideo", "-"],
+                         capture_output=True, check=True).stdout
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, 72 * 128).astype(int)
+    steps = np.abs(np.diff(frames, axis=0)).mean(axis=1)
+    repeats = np.flatnonzero(steps < np.median(steps) * 0.3)
+    assert len(repeats) <= 6  # 5 % slower: a repeated frame now and then
+    assert not np.any(np.diff(repeats) < 10)  # spread out, never every other frame (seen live: 12 fps runs)
+
+
+@needs_ffmpeg
+def test_seam_gap_reads_two_renders_of_one_detailed_picture_as_matching(tmp_path):
+    import subprocess
+    still = tmp_path / "a.mp4"
+    other = tmp_path / "b.mp4"
+    # the same fine pattern, shifted one pixel (a model re-rendering its seed)
+    for path, shift in ((still, 0), (other, 1)):
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        f"nullsrc=s=1280x720:d=0.5,geq=lum='128+120*sin((X+{shift})*1.3)*sin(Y*1.1)':cb=128:cr=128",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)], check=True)
+    assert media.seam_gap(still, other) < media.SEAM_BREAK

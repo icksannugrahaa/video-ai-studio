@@ -351,6 +351,17 @@ def correction_note(clip_error: str | None) -> str | None:
             "no object disappears, none is added, and every place that holds objects stays in view.")
 
 
+def count_right(clip_error: str | None) -> bool:
+    """Whether a clip's end was checked and showed the right count: no note at all,
+    or end-state findings that are not about a count (e.g. "cot tidak terlihat",
+    seen live for an odd container the vision model never recognised)."""
+    if not clip_error:
+        return True
+    if not clip_error.startswith("Frame terakhir:"):
+        return False
+    return not _FINDING_COUNT_RE.search(clip_error.split(":", 1)[1])
+
+
 def sequence_checks(scenes: list[dict], scene: dict) -> dict | None:
     """``end_checks`` plus the containers of the earlier shots of its sequence:
     they are still in the room even when this shot's wording does not mention them."""

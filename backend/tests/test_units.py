@@ -778,3 +778,11 @@ def test_row_counts_reads_the_row_of_a_counting_shot():
     assert planner.row_counts(still) == (3, 3, "apples")
     assert planner.row_counts("Table. START: a cat. ACTION: sleeps. END: a cat.") is None
     assert "bounding box of the basket" in planner.boxes_question("apples", "basket")
+
+
+def test_count_right_ignores_findings_that_are_not_about_the_count():
+    assert planner.count_right(None) and planner.count_right("")
+    assert planner.count_right("Frame terakhir: cot tidak terlihat")
+    assert not planner.count_right("Frame terakhir: apples 5, seharusnya 4, cot tidak terlihat")
+    assert not planner.count_right("Frame terakhir: apples in basket 2, seharusnya 3")
+    assert not planner.count_right("Frame terakhir belum dicek: model chat tidak menjawab.")

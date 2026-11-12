@@ -602,15 +602,16 @@ class Engine:
         return out[0], out[1]
 
     def _build_rig(self, job, project, profile, client, chain, scene, ws, state: dict, noun: str):
-        """A rig from the latest earlier clip of the chain that ends checked and right
-        (no note) with a row of ``noun``; each clip is tried once per job."""
+        """A rig from the latest earlier clip of the chain whose end was checked and
+        counted right (a container the vision model did not recognise does not
+        matter here) with a row of ``noun``; each clip is tried once per job."""
         total = max((c[1] for s in chain if (c := planner.row_counts(s["visual_prompt"])) and c[2] == noun),
                     default=0)
         current = {s["id"]: s for s in self.repo.scenes(project["id"])}
         tried = state.setdefault("_tried", set())
         for s in reversed([current[c["id"]] for c in chain if c["idx"] < scene["idx"] and c["id"] in current]):
             checks = planner.end_checks(s["visual_prompt"])
-            if (s["clip_status"] != "done" or s.get("clip_error") or not s.get("clip_file")
+            if (s["clip_status"] != "done" or not planner.count_right(s.get("clip_error")) or not s.get("clip_file")
                     or not ws.path(s["clip_file"]).exists() or not checks or checks["noun"] != noun
                     or not checks["count"] or s["clip_file"] in tried):
                 continue
@@ -963,6 +964,10 @@ class Engine:
                 except media.MediaError:
                     pass
             retime = (retime or seconds) if active else retime
+            if retime and lead:
+                # the clip starts under the incoming fade: play its first frame there
+                # instead of holding it still (a held head reads as a stall at every cut)
+                retime = round(retime + lead, 3)
             keep_frames = None if retime or fades[n - 1] else self._seam(project, scenes, n - 1, ws)
             key = hashlib.sha1(f"{scene['clip_file']}|{clip_seconds}|{lead}|{keep_frames}|{retime}|"
                                f"{preset['width']}x{preset['height']}|"
